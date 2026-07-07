@@ -1,0 +1,35 @@
+[
+  {
+    "id": "ndbc-46026",
+    "enabled": true,
+    "name": "NDBC Buoy 46026 (San Francisco) — live demo feed",
+    "provider": "NOAA CoastWatch ERDDAP",
+    "server": "https://coastwatch.pfeg.noaa.gov/erddap",
+    "dataset": "cwwcNDBCMet",
+    "station_query": "station=%2246026%22",
+    "time_var": "time",
+    "lat": 37.755,
+    "lon": -122.839,
+    "lookback_hours": 12,
+    "variables": [
+      { "name": "wvht", "label": "wave_height" },
+      { "name": "wtmp", "label": "water_temp" },
+      { "name": "bar", "label": "air_pressure" }
+    ]
+  },
+  {
+    "id": "incois-chennai-tide",
+    "enabled": false,
+    "_comment": "Template for an INCOIS ERDDAP tide gauge. Set the real dataset id + station query from https://erddap.incois.gov.in/erddap/tabledap/ then flip enabled to true.",
+    "name": "INCOIS Tide Gauge — Chennai",
+    "provider": "INCOIS ERDDAP",
+    "server": "https://erddap.incois.gov.in/erddap",
+    "dataset": "REPLACE_WITH_DATASET_ID",
+    "station_query": "station=%22Chennai%22",
+    "time_var": "time",
+    "lat": 13.1,
+    "lon": 80.3,
+    "lookback_hours": 12,
+    "variables": [{ "name": "sea_level", "label": "water_level" }]
+  }
+]

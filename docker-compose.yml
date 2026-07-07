@@ -1,0 +1,85 @@
+services:
+  db:
+    image: timescale/timescaledb-ha:pg16
+    environment:
+      POSTGRES_USER: oceanping
+      POSTGRES_PASSWORD: oceanping
+      POSTGRES_DB: oceanping
+    ports:
+      - "5433:5432"
+    volumes:
+      - dbdata:/home/postgres/pgdata/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oceanping -d oceanping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://oceanping:oceanping@db:5432/oceanping
+      REDIS_URL: redis://redis:6379/0
+      MEDIA_DIR: /data/media
+      ANALYST_USERNAME: ${ANALYST_USERNAME:-analyst}
+      ANALYST_PASSWORD: ${ANALYST_PASSWORD:-oceanping-dev}
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-change-me}
+      NLP_MODE: ${NLP_MODE:-embedding}
+      ERDDAP_POLL_MINUTES: ${ERDDAP_POLL_MINUTES:-10}
+    ports:
+      - "8000:8000"
+    volumes:
+      - media:/data/media
+      - hfcache:/root/.cache/huggingface
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+  bot:
+    build: ./backend
+    profiles: ["bot"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://oceanping:oceanping@db:5432/oceanping
+      REDIS_URL: redis://redis:6379/0
+      MEDIA_DIR: /data/media
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      NLP_MODE: ${NLP_MODE:-embedding}
+    volumes:
+      - media:/data/media
+      - hfcache:/root/.cache/huggingface
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: python -m app.modules.ingest.bot_runner
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Inlined into the client bundle at build time; browser-side fetches
+        # go to the host-mapped backend port.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  dbdata:
+  media:
+  hfcache:

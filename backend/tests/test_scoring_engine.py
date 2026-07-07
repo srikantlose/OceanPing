@@ -1,0 +1,51 @@
+from pytest import approx
+
+from app.modules.scoring import engine
+
+
+def test_weights_sum_to_one():
+    assert abs(sum(engine.WEIGHTS.values()) - 1.0) < 1e-9
+
+
+def test_coherence_curve():
+    assert engine.coherence_score(0) == 0.0
+    assert engine.coherence_score(1) == approx(0.4)
+    assert engine.coherence_score(2) == approx(0.6)
+    assert engine.coherence_score(4) == 1.0
+    assert engine.coherence_score(10) == 1.0
+
+
+def test_instrument_mapping():
+    assert engine.instrument_score([]) == 0.0
+    assert engine.instrument_score([1.0]) == 0.0          # below anomaly floor
+    assert engine.instrument_score([2.5]) == 0.0
+    assert 0.0 < engine.instrument_score([3.5]) < 1.0
+    assert engine.instrument_score([5.0]) == 1.0
+    assert engine.instrument_score([-6.0]) == 1.0          # sign-agnostic
+    assert engine.instrument_score([1.0, 4.0]) == engine.instrument_score([4.0])
+
+
+def test_media_forensics_scores():
+    assert engine.media_score(has_media=False) == engine.MEDIA_NEUTRAL
+    assert engine.media_score(True, phash_reused=True) == 0.0
+    assert engine.media_score(True, exif_gps_km=50.0) == 0.2
+    assert engine.media_score(True, exif_time_offset_hours=24.0) == 0.4
+    assert engine.media_score(True) == 0.6                 # media but no EXIF
+    assert engine.media_score(True, exif_gps_km=0.5, exif_time_offset_hours=0.2) == 1.0
+
+
+def test_combine_bounds_and_blend():
+    assert engine.combine({}) == 0.0
+    assert engine.combine({k: 1.0 for k in engine.WEIGHTS}) == 1.0
+    mid = engine.combine({"trust": 0.5, "coherence": 1.0, "instrument": 1.0, "media": 0.5})
+    assert abs(mid - (0.125 + 0.30 + 0.30 + 0.075)) < 1e-6
+
+
+def test_citizen_only_reports_cannot_reach_corroborated_threshold_without_instruments():
+    # Even a perfect trust/coherence/media report stays below auto-escalation
+    # unless instruments agree — the no-citizen-only-escalation rule holds
+    # numerically as well as by the explicit instrument>0 gate.
+    best_citizen_only = engine.combine(
+        {"trust": 0.95, "coherence": 1.0, "instrument": 0.0, "media": 1.0}
+    )
+    assert best_citizen_only < 0.7  # and the service additionally requires instrument > 0
