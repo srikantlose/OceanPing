@@ -21,11 +21,20 @@ class Settings(BaseSettings):
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
 
-    # "embedding" uses sentence-transformers; "keyword" is a light fallback.
+    # "embedding" uses sentence-transformers; "keyword" is a light fallback;
+    # "finetuned" tries a retrain.py artifact first, degrading to embedding/keyword
+    # if it can't load (see nlp_model_version below).
     nlp_mode: str = "embedding"
     embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     embedding_dim: int = 384
     classify_threshold: float = 0.35
+
+    # Active-learning loop (phase 1, milestone 4): retrain.py writes classifier
+    # artifacts under training_artifacts_dir/<version>/classifier.joblib.
+    # nlp_model_version is the canary flag — promotion is a manual config flip,
+    # never automatic, so a bad retrain can't silently degrade production.
+    training_artifacts_dir: str = "./data/models"
+    nlp_model_version: str = ""
 
     erddap_poll_minutes: int = 10
     rescore_minutes: int = 2

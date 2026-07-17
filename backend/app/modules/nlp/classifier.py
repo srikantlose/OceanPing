@@ -2,9 +2,13 @@
 with a keyword fallback when the model is unavailable (NLP_MODE=keyword).
 
 Callers use classify() / embed() only, so a fine-tuned model can replace the
-internals without touching the ingest pipeline.
+internals without touching the ingest pipeline. NLP_MODE=finetuned tries a
+retrain.py artifact (a logistic-regression head over the same embeddings, see
+backend/training/train_classifier.py) before falling back to embedding/keyword,
+exactly like the embedding model's own load-failure fallback below.
 """
 import logging
+import os
 import threading
 from dataclasses import dataclass, field
 
@@ -20,6 +24,10 @@ _model = None
 _prototype_matrix: np.ndarray | None = None
 _prototype_labels: list[str] = []
 _model_failed = False
+
+_clf_lock = threading.Lock()
+_clf = None
+_clf_failed = False
 
 
 @dataclass
@@ -77,6 +85,33 @@ def _load_model():
     return _model
 
 
+def _load_finetuned():
+    """Lazy-load the retrain.py artifact named by settings.nlp_model_version.
+    Load-once-cache-failure, same shape as _load_model() above: a missing
+    version, missing file, or corrupt artifact just falls back, it never
+    raises out of classify()."""
+    global _clf, _clf_failed
+    if _clf is not None or _clf_failed:
+        return _clf
+    with _clf_lock:
+        if _clf is not None or _clf_failed:
+            return _clf
+        settings = get_settings()
+        if not settings.nlp_model_version:
+            _clf_failed = True
+            return None
+        path = os.path.join(settings.training_artifacts_dir, settings.nlp_model_version, "classifier.joblib")
+        try:
+            import joblib
+
+            _clf = joblib.load(path)
+            log.info("Fine-tuned classifier loaded: %s", settings.nlp_model_version)
+        except Exception:
+            log.exception("Fine-tuned classifier unavailable (%s); falling back", path)
+            _clf_failed = True
+    return _clf
+
+
 def embed(text: str) -> list[float] | None:
     if get_settings().nlp_mode != "embedding":
         return None
@@ -104,7 +139,18 @@ def classify(text: str | None) -> Classification:
     if not text or not text.strip():
         return Classification(hazard_type=None)
     settings = get_settings()
-    if settings.nlp_mode == "embedding" and _load_model() is not None:
+    if settings.nlp_mode == "finetuned":
+        embedder = _load_model()
+        clf = _load_finetuned()
+        if embedder is not None and clf is not None:
+            vec = np.array(embedder.encode([text], normalize_embeddings=True)[0])
+            proba = clf.predict_proba([vec])[0]
+            per_class = {str(lbl): round(float(p), 4) for lbl, p in zip(clf.classes_, proba)}
+            best = max(per_class, key=per_class.get)
+            hazard = best if per_class[best] >= settings.classify_threshold else None
+            return Classification(hazard_type=hazard, scores=per_class, embedding=vec.tolist(), mode="finetuned")
+        # No trained artifact (or embedder) available yet — degrade to embedding/keyword.
+    if settings.nlp_mode in ("embedding", "finetuned") and _load_model() is not None:
         vec = np.array(_model.encode([text], normalize_embeddings=True)[0])
         sims = _prototype_matrix @ vec
         # Mean of top-2 prototype similarities per class.

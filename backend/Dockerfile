@@ -12,6 +12,7 @@ COPY alembic.ini pytest.ini ./
 COPY alembic ./alembic
 COPY app ./app
 COPY tests ./tests
+COPY training ./training
 
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

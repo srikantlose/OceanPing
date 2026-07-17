@@ -1,6 +1,6 @@
 # Phase 1 — Intelligence Core & Tiered Alerting (blueprint weeks 7–14, gap plan)
 
-**Status: 🟡 in progress — Milestones 1–3 built (July 2026).** Prereq: phase 0 (built).
+**Status: 🟡 in progress — Milestones 1–4 built (July 2026).** Prereq: phase 0 (built).
 Everything here stays inside the monolith.
 
 ## Milestone 1 — as built
@@ -108,6 +108,71 @@ process doesn't run here — the transcription unit is verified, but an actual "
 voice note to the bot" pass is still open per this plan's Verification section, to be done by
 whoever configures a real bot token.
 
+## Milestone 4 — as built
+
+The active-learning loop's export + retrain + swap seam is live, deliberately scoped down
+from a full MuRIL/IndicBERT fine-tune to a linear probe until labeled volume justifies more:
+
+- `backend/app/models.py` — `TrainingExample` (report_id, text, lang, hazard_type, outcome)
+  and `ModelVersion` (name, artifact_path, metrics, training_examples_count). Migration
+  `0004_training.py` (follows `0002`'s `Base.metadata.create_all` pattern for new tables).
+- `backend/app/modules/scoring/service.py::apply_verification()` — one-line hook per the
+  plan: every verify/reject inserts a `TrainingExample` row alongside the existing
+  `Verification` row.
+- `backend/training/train_classifier.py` — `train(examples)`: encodes text with the same
+  multilingual sentence-transformer `classifier.py` already uses in embedding mode, fits a
+  `LogisticRegression` head over those embeddings, holds out an eval split (falls back to
+  reporting training-set fit, clearly flagged `held_out_eval: false`, when there's too
+  little data to split — the common case pre-pilot). Drops any hazard class with fewer than
+  2 examples rather than erroring. Returns `None` (not an exception) when there aren't at
+  least 2 usable classes — "not enough data yet" is an expected, handled state, not a bug.
+- `backend/training/retrain.py` — the operational wrapper (`python -m training.retrain
+  [--dry-run]`): exports verified `training_examples`, calls `train_classifier.train()`,
+  prints metrics, and (unless `--dry-run`) writes `{training_artifacts_dir}/<version>/
+  classifier.joblib` plus a `ModelVersion` row. Version name is a timestamp
+  (`finetuned-YYYYMMDD-HHMMSS`); nothing is auto-promoted.
+- `backend/app/modules/nlp/classifier.py` — new `NLP_MODE=finetuned`: lazy-loads the
+  joblib artifact named by `NLP_MODEL_VERSION` (mirrors `_load_model()`'s load-once-cache-
+  failure pattern exactly, down to a second lock/globals pair). A missing/unset version or
+  a corrupt artifact degrades to embedding mode, then keyword, same as every other failure
+  path in this module — `classify()`'s signature and callers are untouched, per the plan.
+- `docker-compose.yml` — new `models` named volume mounted at `/srv/data/models` on
+  `backend` and `bot` (the two services that call `classify()`); without it, artifacts
+  written by `retrain.py` would vanish on the next container recreate. `worker` doesn't
+  classify, so it doesn't need the mount. `NLP_MODEL_VERSION` env var threaded through
+  alongside the existing `NLP_MODE`.
+- `backend/Dockerfile` — `COPY training ./training`, so `python -m training.retrain` runs
+  the same way `worker.py` does, inside the existing backend image.
+- Tests: `test_train_classifier.py` (class-dropping, embedder-unavailable, separable-fit
+  cases, using a fake deterministic embedder so no real model download is needed),
+  `test_retrain.py` (export filtering, `--dry-run` vs. real write, using fake DB objects —
+  no test in this suite touches a real Postgres connection, this one included),
+  `test_classifier_finetuned.py` (finetuned-mode happy path, degrade-to-embedding,
+  degrade-to-keyword, and the two `_load_finetuned()` failure-caching cases).
+
+**Verified live, not just under mocks:** ran `python -m training.retrain --dry-run` against
+the live stack with zero verified examples (correctly reports "not enough labeled data" and
+exits 1); seeded a handful of verified `training_examples` across two hazard classes,
+re-ran `retrain.py` for real against the actual sentence-transformer model (not a fake) —
+it exported the rows, trained, and wrote a real artifact + `model_versions` row; then
+loaded that exact artifact via `NLP_MODE=finetuned` / `NLP_MODEL_VERSION=<version>` in a
+fresh Python process and confirmed `classify()` returns `mode="finetuned"` predictions from
+it. The seed data was removed afterward — it was verification scaffolding, not real drill
+output. Also confirmed the full test suite runs clean at 78 tests and `scripts/drill.py`
+still exercises the analyst-verify path (which now doubles as the training-export hook)
+without regressions.
+
+**Deliberately not done yet, per the plan's own risk note:** a real MuRIL/IndicBERT
+fine-tune. The plan calls out that a transformer fine-tune needs `training_examples` to
+clear roughly 500 rows before it's worth the training cost; at real-world verification
+volume today, a linear probe over frozen embeddings is the honest scope for "the swappable
+seam behind `classify()`" — swapping in an actual fine-tune later is a `train_classifier.py`
+change, not a `classify()` or ingest-pipeline change, exactly as designed. Also not done:
+milestone 5's correction UI, so rejected reports are recorded (`outcome="reject"`) but
+`retrain.py` doesn't train on them yet — a reject doesn't tell you the *correct* hazard
+type, just that the report wasn't credible, so using them as training labels needs the
+"wrong hazard? which?" correction prompt milestone 5 adds.
+
 ## Remaining milestones (unchanged from original plan below)
 
 ## Goals
@@ -207,7 +272,8 @@ Compose service `worker` (same backend image). Optional: `faster-whisper` model 
 1. ✅ Alerts module + composer UI + public alert layer (Telegram broadcast only)
 2. ✅ Delivery worker + subscriptions + web push + SMS stub
 3. ✅ Whisper voice reports through the bot
-4. Training export + retrain script + MuRIL swap behind `classify()`
+4. ✅ Training export + retrain script + linear-probe swap behind `classify()` (full
+   MuRIL/IndicBERT fine-tune deferred until labeled volume clears the ~500-row threshold)
 5. Hearsay signal into scoring + correction UI
 
 ## Verification
@@ -218,4 +284,6 @@ Compose service `worker` (same backend image). Optional: `faster-whisper` model 
   assert a subscribed drill Telegram chat (or ConsoleAdapter log) received it and
   `alert_deliveries` + audit chain record it.
 - Voice: send a Tamil voice note to the bot → report appears with transcript + correct class.
-- Retrain dry-run: `python backend/training/retrain.py --dry-run` produces metrics report.
+- ✅ Retrain dry-run: `python -m training.retrain --dry-run` (inside the backend container)
+  produces a metrics report — verified both the "not enough data" and real-metrics cases
+  against the live stack.

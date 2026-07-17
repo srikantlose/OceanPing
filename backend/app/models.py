@@ -228,7 +228,32 @@ class AlertDelivery(Base):
     attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class TrainingExample(Base):
+    __tablename__ = "training_examples"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=new_uuid)
+    report_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("reports.id"), index=True)
+    text: Mapped[str] = mapped_column(Text)
+    lang: Mapped[str] = mapped_column(String(8), default="und")
+    hazard_type: Mapped[str] = mapped_column(String(32))
+    outcome: Mapped[str] = mapped_column(String(16))  # verify | reject
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class ModelVersion(Base):
+    __tablename__ = "model_versions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=new_uuid)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    kind: Mapped[str] = mapped_column(String(32), default="linear_probe")
+    artifact_path: Mapped[str] = mapped_column(String(512))
+    metrics: Mapped[dict] = mapped_column(JSONB, default=dict)
+    training_examples_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
 Index("ix_reports_cell_time", Report.h3_cell, Report.created_at)
 Index("ix_readings_station_var_time", SensorReading.station_id, SensorReading.variable, SensorReading.time)
 Index("ix_subscriptions_channel_address", Subscription.channel, Subscription.address, unique=True)
 Index("ix_alerts_incident_status", Alert.incident_id, Alert.status)
+Index("ix_training_examples_outcome", TrainingExample.outcome)

@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.models import Report, Reporter, Station, StationAnomaly, Verification
+from app.models import Report, Reporter, Station, StationAnomaly, TrainingExample, Verification
 from app.modules.alerts.service import sync_incident_alert
 from app.modules.scoring import engine
 from app.modules.scoring.audit import append_audit
@@ -175,6 +175,15 @@ def apply_verification(
         reporter.debunked_count += 1
 
     db.add(Verification(report_id=report.id, analyst=analyst, action=action, note=note))
+    db.add(
+        TrainingExample(
+            report_id=report.id,
+            text=report.text or "",
+            lang=report.lang,
+            hazard_type=report.hazard_type,
+            outcome=action,
+        )
+    )
     append_audit(
         db,
         event_type="report.status_changed",
