@@ -26,15 +26,19 @@ from telegram.ext import (
     filters,
 )
 
+from sqlalchemy import select
+
 from app.core.config import get_settings
 from app.core.db import SessionLocal
-from app.models import HAZARD_TYPES
+from app.models import HAZARD_TYPES, Subscription
+from app.modules.alerts.geofence import cells_around
 from app.modules.ingest.service import RateLimited, create_report
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 LOCATION, HAZARD, DESCRIPTION, PHOTO = range(4)
+SUBSCRIBE_LOCATION = 100  # separate state space; independent ConversationHandler
 
 HAZARD_LABELS = {
     "coastal_flooding": "🌊 Coastal flooding",
@@ -55,9 +59,75 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Use /report to report something you can see happening on the coast.\n"
         "Your report is cross-checked against ocean sensors and nearby reports "
         "before authorities see it as verified.\n\n"
-        "Commands:\n/report — submit a hazard report\n/cancel — abort a report",
+        "Use /subscribe to get alerts for hazards near a place you care about.\n\n"
+        "Commands:\n/report — submit a hazard report\n"
+        "/subscribe — get alerts for an area\n/unsubscribe — stop alerts\n"
+        "/cancel — abort a report",
         parse_mode="Markdown",
     )
+
+
+async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    keyboard = ReplyKeyboardMarkup(
+        [[KeyboardButton("📍 Share a location", request_location=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+    await update.message.reply_text(
+        "Share a location to subscribe to hazard alerts near it (your home, "
+        "your boat's harbour, a relative's village…).",
+        reply_markup=keyboard,
+    )
+    return SUBSCRIBE_LOCATION
+
+
+async def on_subscribe_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    loc = update.message.location
+    chat_id = str(update.effective_chat.id)
+    lang = (update.effective_user.language_code or "en").split("-")[0]
+    settings = get_settings()
+
+    def _upsert():
+        db = SessionLocal()
+        try:
+            cells = cells_around(loc.latitude, loc.longitude, settings.subscription_radius_rings)
+            sub = db.scalar(
+                select(Subscription)
+                .where(Subscription.channel == "telegram")
+                .where(Subscription.address == chat_id)
+            )
+            if sub is None:
+                sub = Subscription(channel="telegram", address=chat_id)
+                db.add(sub)
+            sub.h3_cells = cells
+            sub.lang = lang if lang in ("en", "hi", "ta") else "en"
+            db.commit()
+        finally:
+            db.close()
+
+    await asyncio.to_thread(_upsert)
+    await update.message.reply_text(
+        "✅ Subscribed. You'll get an alert here when a hazard is reported and "
+        "corroborated near that location. Use /unsubscribe to stop.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return ConversationHandler.END
+
+
+async def cmd_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = str(update.effective_chat.id)
+
+    def _delete() -> int:
+        db = SessionLocal()
+        try:
+            n = db.query(Subscription).filter_by(channel="telegram", address=chat_id).delete()
+            db.commit()
+            return n
+        finally:
+            db.close()
+
+    n = await asyncio.to_thread(_delete)
+    await update.message.reply_text("Unsubscribed." if n else "You weren't subscribed to anything.")
 
 
 async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -195,8 +265,15 @@ def main() -> None:
         },
         fallbacks=[CommandHandler("cancel", cmd_cancel)],
     )
+    subscribe_conv = ConversationHandler(
+        entry_points=[CommandHandler("subscribe", cmd_subscribe)],
+        states={SUBSCRIBE_LOCATION: [MessageHandler(filters.LOCATION, on_subscribe_location)]},
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+    )
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(conv)
+    app.add_handler(subscribe_conv)
+    app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
     log.info("OceanPing Telegram bot polling…")
     app.run_polling()
 

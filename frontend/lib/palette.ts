@@ -39,6 +39,20 @@ export const STATUS_LABELS: Record<string, string> = {
   rejected: "Rejected",
 };
 
+// Alert tier — reserved (never reused for series), same status-role family as
+// STATUS_COLORS but a distinct scale so a tier never impersonates a report status.
+export const ALERT_TIER_COLORS: Record<string, string> = {
+  advisory: "#3987e5",
+  watch: "#fab219",
+  warning: "#d03b3b",
+};
+
+export const ALERT_TIER_LABELS: Record<string, string> = {
+  advisory: "Advisory",
+  watch: "Watch",
+  warning: "Warning",
+};
+
 export const INK = {
   primary: "#ffffff",
   secondary: "#c3c2b7",

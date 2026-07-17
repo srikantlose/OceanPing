@@ -4,6 +4,8 @@ import { useState } from "react";
 import useSWR from "swr";
 import { getJSON, postJSON } from "@/lib/api";
 import {
+  ALERT_TIER_COLORS,
+  ALERT_TIER_LABELS,
   HAZARD_COLORS,
   HAZARD_LABELS,
   STATUS_COLORS,
@@ -31,6 +33,15 @@ function HazardChip({ hazard }: { hazard: string }) {
     <span className="chip">
       <span className="dot" style={{ background: HAZARD_COLORS[hazard] || "#898781" }} />
       {HAZARD_LABELS[hazard] || hazard}
+    </span>
+  );
+}
+
+function TierChip({ tier }: { tier: string }) {
+  return (
+    <span className="chip">
+      <span className="dot" style={{ background: ALERT_TIER_COLORS[tier] || "#898781" }} />
+      {ALERT_TIER_LABELS[tier] || tier}
     </span>
   );
 }
@@ -129,10 +140,19 @@ export default function AnalystDashboard() {
     fetcher,
     { refreshInterval: 15_000 }
   );
+  const { data: alerts, mutate: refreshAlerts } = useSWR(
+    token ? "/analyst/alerts" : null,
+    fetcher,
+    { refreshInterval: 10_000 }
+  );
 
   if (!token) return <Login onToken={setToken} />;
 
   const selected = (reports || []).find((r: any) => r.id === selectedId);
+  const activeAlertByIncident: Record<string, any> = {};
+  for (const a of alerts || []) {
+    if (a.status === "active") activeAlertByIncident[a.incident_id] = a;
+  }
 
   async function decide(action: "verify" | "reject") {
     if (!selected) return;
@@ -140,6 +160,20 @@ export default function AnalystDashboard() {
     setNote("");
     refreshReports();
     refreshIncidents();
+  }
+
+  async function issueWarning(incidentId: string) {
+    const note = window.prompt(
+      "Optional note for this warning (recorded in the audit log, sent to subscribers):"
+    );
+    if (note === null) return; // cancelled
+    await postJSON(`/analyst/incidents/${incidentId}/warning`, { note: note || null }, token!);
+    refreshAlerts();
+  }
+
+  async function expireAlert(alertId: string) {
+    await postJSON(`/analyst/alerts/${alertId}/expire`, {}, token!);
+    refreshAlerts();
   }
 
   async function checkAudit() {
@@ -205,20 +239,69 @@ export default function AnalystDashboard() {
                 <th>Reports</th>
                 <th>Peak conf.</th>
                 <th>Last seen</th>
+                <th>Alert</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
-              {(incidents || []).map((inc: any) => (
-                <tr key={inc.id}>
-                  <td><HazardChip hazard={inc.hazard_type} /></td>
-                  <td><StatusChip status={inc.status} /></td>
-                  <td>{inc.report_count}</td>
-                  <td>{Math.round(inc.max_confidence * 100)}%</td>
-                  <td>{new Date(inc.last_seen).toLocaleTimeString()}</td>
+              {(incidents || []).map((inc: any) => {
+                const active = activeAlertByIncident[inc.id];
+                const canIssueWarning =
+                  (inc.status === "corroborated" || inc.status === "verified") &&
+                  active?.tier !== "warning";
+                return (
+                  <tr key={inc.id}>
+                    <td><HazardChip hazard={inc.hazard_type} /></td>
+                    <td><StatusChip status={inc.status} /></td>
+                    <td>{inc.report_count}</td>
+                    <td>{Math.round(inc.max_confidence * 100)}%</td>
+                    <td>{new Date(inc.last_seen).toLocaleTimeString()}</td>
+                    <td>{active ? <TierChip tier={active.tier} /> : <span style={{ color: "var(--muted)" }}>—</span>}</td>
+                    <td>
+                      {canIssueWarning && (
+                        <button className="danger" onClick={() => issueWarning(inc.id)}>
+                          Issue warning
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+              {(incidents || []).length === 0 && (
+                <tr><td colSpan={7} style={{ color: "var(--muted)" }}>No incidents yet.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="card">
+          <h3>Active alerts</h3>
+          <table className="data">
+            <thead>
+              <tr>
+                <th>Tier</th>
+                <th>Hazard</th>
+                <th>Message</th>
+                <th>Issued by</th>
+                <th>Expires</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {(alerts || []).filter((a: any) => a.status === "active").map((a: any) => (
+                <tr key={a.id}>
+                  <td><TierChip tier={a.tier} /></td>
+                  <td><HazardChip hazard={a.hazard_type} /></td>
+                  <td style={{ maxWidth: 320 }}>{a.message?.en}</td>
+                  <td>{a.issued_by || "automatic"}</td>
+                  <td>{a.expires_at ? new Date(a.expires_at).toLocaleString() : "—"}</td>
+                  <td>
+                    <button onClick={() => expireAlert(a.id)}>Expire</button>
+                  </td>
                 </tr>
               ))}
-              {(incidents || []).length === 0 && (
-                <tr><td colSpan={5} style={{ color: "var(--muted)" }}>No incidents yet.</td></tr>
+              {(alerts || []).filter((a: any) => a.status === "active").length === 0 && (
+                <tr><td colSpan={6} style={{ color: "var(--muted)" }}>No active alerts.</td></tr>
               )}
             </tbody>
           </table>

@@ -4,7 +4,14 @@ import { useEffect, useRef } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { API_BASE } from "@/lib/api";
-import { HAZARD_COLORS, HAZARD_LABELS, INK, STATUS_COLORS } from "@/lib/palette";
+import {
+  ALERT_TIER_COLORS,
+  ALERT_TIER_LABELS,
+  HAZARD_COLORS,
+  HAZARD_LABELS,
+  INK,
+  STATUS_COLORS,
+} from "@/lib/palette";
 import { sparklineSVG } from "@/lib/sparkline";
 
 const REFRESH_MS = 15_000;
@@ -33,6 +40,11 @@ function hazardMatch(): any {
   return ["match", ["get", "hazard_type"], ...pairs.slice(0, -1), HAZARD_COLORS.other];
 }
 
+function tierMatch(): any {
+  const pairs = Object.entries(ALERT_TIER_COLORS).flat();
+  return ["match", ["get", "tier"], ...pairs.slice(0, -1), ALERT_TIER_COLORS.advisory];
+}
+
 async function fetchFC(path: string) {
   try {
     const res = await fetch(`${API_BASE}${path}`, { cache: "no-store" });
@@ -59,7 +71,7 @@ export default function MapView() {
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
 
     map.on("load", () => {
-      for (const id of ["hotspots", "incident-cells", "incidents", "reports", "stations"]) {
+      for (const id of ["hotspots", "alerts", "incident-cells", "incidents", "reports", "stations"]) {
         map.addSource(id, { type: "geojson", data: EMPTY_FC as any });
       }
 
@@ -74,6 +86,22 @@ export default function MapView() {
         type: "line",
         source: "hotspots",
         paint: { "line-color": INK.critical, "line-width": 2, "line-dasharray": [2, 1.5] },
+      });
+
+      map.addLayer({
+        id: "alerts-fill",
+        type: "fill",
+        source: "alerts",
+        paint: { "fill-color": tierMatch(), "fill-opacity": 0.16 },
+      });
+      map.addLayer({
+        id: "alerts-line",
+        type: "line",
+        source: "alerts",
+        paint: {
+          "line-color": tierMatch(),
+          "line-width": ["match", ["get", "tier"], "warning", 3, 2],
+        },
       });
 
       map.addLayer({
@@ -151,8 +179,9 @@ export default function MapView() {
       });
 
       const refresh = async () => {
-        const [hotspots, incidents, reports, stations] = await Promise.all([
+        const [hotspots, alerts, incidents, reports, stations] = await Promise.all([
           fetchFC("/map/hotspots"),
+          fetchFC("/map/alerts"),
           fetchFC("/map/incidents"),
           fetchFC("/map/reports"),
           fetchFC("/map/stations"),
@@ -170,6 +199,7 @@ export default function MapView() {
           f.properties.has_anomaly = (f.properties.anomalies || []).length > 0;
         }
         (map.getSource("hotspots") as any)?.setData(hotspots);
+        (map.getSource("alerts") as any)?.setData(alerts);
         (map.getSource("incident-cells") as any)?.setData(cells);
         (map.getSource("incidents") as any)?.setData(incidents);
         (map.getSource("reports") as any)?.setData(reports);
@@ -207,6 +237,19 @@ export default function MapView() {
         );
       });
 
+      map.on("click", "alerts-fill", (e) => {
+        const p: any = e.features?.[0]?.properties;
+        if (!p) return;
+        const tierColor = ALERT_TIER_COLORS[p.tier] || ALERT_TIER_COLORS.advisory;
+        popup(
+          e.lngLat,
+          `<div class="popup-title" style="color:${tierColor}">${ALERT_TIER_LABELS[p.tier] || p.tier}</div>
+           <div class="popup-sub">${HAZARD_LABELS[p.hazard_type] || p.hazard_type} · issued by ${p.issued_by}</div>
+           <div style="font-size:12px">${p.message}</div>
+           ${p.expires_at ? `<div class="spark-caption">expires ${new Date(p.expires_at).toLocaleString()}</div>` : ""}`
+        );
+      });
+
       map.on("click", "incidents-circles", (e) => {
         const p: any = e.features?.[0]?.properties;
         if (!p) return;
@@ -231,7 +274,7 @@ export default function MapView() {
         );
       });
 
-      for (const layer of ["stations-circles", "incidents-circles", "reports-circles"]) {
+      for (const layer of ["stations-circles", "incidents-circles", "reports-circles", "alerts-fill"]) {
         map.on("mouseenter", layer, () => (map.getCanvas().style.cursor = "pointer"));
         map.on("mouseleave", layer, () => (map.getCanvas().style.cursor = ""));
       }
@@ -251,6 +294,13 @@ export default function MapView() {
         {Object.entries(HAZARD_LABELS).map(([key, label]) => (
           <div className="legend-row" key={key}>
             <span className="legend-swatch" style={{ background: HAZARD_COLORS[key] }} />
+            {label}
+          </div>
+        ))}
+        <h4 style={{ marginTop: 8 }}>Alerts</h4>
+        {Object.entries(ALERT_TIER_LABELS).map(([key, label]) => (
+          <div className="legend-row" key={key}>
+            <span className="legend-swatch ring" style={{ borderColor: ALERT_TIER_COLORS[key] }} />
             {label}
           </div>
         ))}

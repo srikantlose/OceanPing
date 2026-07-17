@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models import Report, Reporter, Station, StationAnomaly, Verification
+from app.modules.alerts.service import sync_incident_alert
 from app.modules.scoring import engine
 from app.modules.scoring.audit import append_audit
 
@@ -125,6 +126,11 @@ def rescore_report(db: Session, report: Report) -> float:
         inc.max_confidence = max(inc.max_confidence, new_confidence)
         if report.status == "corroborated" and inc.status == "unverified":
             inc.status = "corroborated"
+        db.flush()
+        try:
+            sync_incident_alert(db, inc)
+        except Exception:
+            log.exception("Alert sync failed for incident %s", inc.id)
     db.flush()
     return new_confidence
 
@@ -158,6 +164,11 @@ def apply_verification(
         reporter.verified_count += 1
         if report.incident is not None:
             report.incident.status = "verified"
+            db.flush()
+            try:
+                sync_incident_alert(db, report.incident)
+            except Exception:
+                log.exception("Alert sync failed for incident %s", report.incident.id)
     else:
         report.status = "rejected"
         reporter.trust_score = max(TRUST_MIN, reporter.trust_score - TRUST_STEP_DOWN)

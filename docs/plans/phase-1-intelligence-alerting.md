@@ -1,6 +1,48 @@
 # Phase 1 — Intelligence Core & Tiered Alerting (blueprint weeks 7–14, gap plan)
 
-**Status: 🔲 planned.** Prereq: phase 0 (built). Everything here stays inside the monolith.
+**Status: 🟡 in progress — Milestone 1 built (July 2026).** Prereq: phase 0 (built).
+Everything here stays inside the monolith.
+
+## Milestone 1 — as built
+
+The alerts engine, composer, and public layer are live:
+
+- `backend/app/modules/alerts/engine.py` — pure tier-eligibility function. Structurally
+  incapable of returning `"warning"` (no `analyst`/`issued_by` parameter exists in its
+  signature — enforced by `test_eligible_tier_signature_has_no_analyst_parameter` and a
+  brute-force sweep in `test_eligible_tier_can_never_return_warning`).
+- `backend/app/modules/alerts/service.py` — `sync_incident_alert()` (auto advisory/watch,
+  hooked into `scoring/service.py::rescore_report` and `apply_verification`),
+  `issue_warning()` (the only path to warning tier — always analyst-attributed),
+  `expire_alert()`, and a synchronous best-effort Telegram `_broadcast()`.
+- `backend/app/modules/alerts/router.py` — `POST /analyst/incidents/{id}/warning`,
+  `POST /analyst/alerts/{id}/expire`, `GET /analyst/alerts`, public `GET /map/alerts`.
+- Telegram bot: `/subscribe` (shares a location → H3 k-ring geofence) and `/unsubscribe`
+  (`modules/ingest/bot_runner.py`).
+- Frontend: alert polygon layer in `MapView.tsx`, "Issue warning" / "Expire" actions and
+  an active-alerts panel in `AnalystDashboard.tsx`, tier colors in `lib/palette.ts`.
+- Migration `0002_alerts.py`: `alerts`, `subscriptions`, `alert_deliveries`,
+  `reporters.role`.
+- Tests: `backend/tests/test_alerts_engine.py` (11 cases). `scripts/drill.py` now issues
+  and expires a warning and asserts the public map reflects both, on top of the existing
+  end-to-end flow — verified passing against the live stack.
+
+**Known limitation, by design (documented, not a bug):** broadcast is synchronous and
+in-process — Milestone 2's delivery worker replaces this once channel count/volume
+demands it.
+
+**Observed pre-existing quirk (not introduced by this milestone, not yet root-caused):**
+during manual post-drill inspection, a `station_anomalies` row transitioned from
+`active=true` to `active=false` without a corresponding `anomaly.resolved` audit entry,
+and outside of any traceable `detect_anomalies()` invocation (checked via APScheduler
+logs). `detect_anomalies()`'s refresh branch (`sensors/service.py`) doesn't audit-log
+in-place refreshes, only creation/resolution, which made this hard to pin down. Doesn't
+affect correctness of the escalation gate — reports never reach `verified`/`warning`
+without a human regardless of anomaly flapping — but worth instrumenting further (e.g.
+audit-log every active-state transition, including refreshes) before phase 2 leans
+harder on instrument corroboration.
+
+## Remaining milestones (unchanged from original plan below)
 
 ## Goals
 
@@ -96,7 +138,7 @@ Compose service `worker` (same backend image). Optional: `faster-whisper` model 
 
 ## Milestones
 
-1. Alerts module + composer UI + public alert layer (Telegram broadcast only)
+1. ✅ Alerts module + composer UI + public alert layer (Telegram broadcast only)
 2. Delivery worker + subscriptions + web push + SMS stub
 3. Whisper voice reports through the bot
 4. Training export + retrain script + MuRIL swap behind `classify()`

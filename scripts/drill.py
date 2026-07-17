@@ -137,6 +137,35 @@ def main() -> None:
     hotspots = call(args.api, "/map/hotspots")
     print(f"   hotspots on map: {len(hotspots['features'])}")
 
+    print("→ Alerts auto-proposed from incident corroboration:")
+    alerts = call(args.api, "/analyst/alerts", token=token)
+    active_alerts = [a for a in alerts if a["status"] == "active"]
+    for a in active_alerts[:6]:
+        print(f"   [{a['tier']:>8}] {a['hazard_type']:<17} issued_by={a['issued_by'] or 'auto':<10} "
+              f"\"{a['message'].get('en', '')[:60]}\"")
+    auto_tiers = {a["tier"] for a in active_alerts if a["issued_by"] is None}
+    assert "warning" not in auto_tiers, "auto-issued alert reached warning tier — escalation gate is broken"
+    print(f"   {len(active_alerts)} active alert(s); none auto-escalated to warning "
+          "(warning is analyst-only, as designed)")
+
+    if incidents:
+        biggest = max(incidents, key=lambda i: i["report_count"])
+        print(f"→ Analyst issues a WARNING for the incident with {biggest['report_count']} merged reports…")
+        warning = call(args.api, f"/analyst/incidents/{biggest['id']}/warning", method="POST",
+                       token=token, json_body={"note": "Drill: confirmed via tide gauge + cluster size"})
+        print(f"   alert {warning['id'][:8]} tier={warning['tier']} issued_by={warning['issued_by']}")
+        public_alerts = call(args.api, "/map/alerts")
+        assert any(f["properties"]["id"] == warning["id"] for f in public_alerts["features"]), \
+            "issued warning did not appear on the public alert map"
+        print(f"   public map now shows {len(public_alerts['features'])} active alert(s), incl. the warning")
+
+        print(f"→ Analyst expires alert {warning['id'][:8]}…")
+        call(args.api, f"/analyst/alerts/{warning['id']}/expire", method="POST", token=token, json_body={})
+        public_alerts = call(args.api, "/map/alerts")
+        assert not any(f["properties"]["id"] == warning["id"] for f in public_alerts["features"]), \
+            "expired warning is still showing on the public alert map"
+        print("   expired — no longer on the public map")
+
     if corroborated:
         target = corroborated[0]
         print(f"→ Analyst verifies report {target['id'][:8]}…")

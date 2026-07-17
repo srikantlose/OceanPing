@@ -40,6 +40,13 @@ class Settings(BaseSettings):
 
     corroborated_threshold: float = 0.6
 
+    # Alerts (phase 1): watch tier needs an instrument-consistent anomaly AND
+    # this many independent reporters on the incident; warning is analyst-only.
+    alert_min_watch_reporters: int = 3
+    alert_default_expiry_hours: float = 6.0
+    # H3 k-ring radius (res 8) used to build a subscriber's geofence from one point.
+    subscription_radius_rings: int = 10
+
     class Config:
         env_file = ".env"
         extra = "ignore"

@@ -55,6 +55,7 @@ class Reporter(Base):
     trust_score: Mapped[float] = mapped_column(Float, default=0.5)
     verified_count: Mapped[int] = mapped_column(Integer, default=0)
     debunked_count: Mapped[int] = mapped_column(Integer, default=0)
+    role: Mapped[str] = mapped_column(String(16), default="citizen")  # citizen | fisherman | volunteer (phase 2)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     reports: Mapped[list["Report"]] = relationship(back_populates="reporter")
@@ -181,5 +182,49 @@ class AuditLog(Base):
     hash: Mapped[str] = mapped_column(String(64))
 
 
+ALERT_TIERS = ["advisory", "watch", "warning"]
+
+
+class Alert(Base):
+    __tablename__ = "alerts"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=new_uuid)
+    incident_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("incidents.id"), index=True)
+    hazard_type: Mapped[str] = mapped_column(String(32), index=True)
+    tier: Mapped[str] = mapped_column(String(16), index=True)  # advisory | watch | warning
+    h3_cells: Mapped[list] = mapped_column(JSONB, default=list)
+    message: Mapped[dict] = mapped_column(JSONB, default=dict)  # {"en": "...", ...}
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)  # active | expired
+    issued_by: Mapped[str | None] = mapped_column(String(128), nullable=True)  # analyst username; None = automatic
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Subscription(Base):
+    __tablename__ = "subscriptions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=new_uuid)
+    channel: Mapped[str] = mapped_column(String(16))  # telegram (web_push, sms in phase 2)
+    address: Mapped[str] = mapped_column(String(256))  # e.g. telegram chat id
+    h3_cells: Mapped[list] = mapped_column(JSONB, default=list)  # geofence cell set
+    min_tier: Mapped[str] = mapped_column(String(16), default="advisory")
+    lang: Mapped[str] = mapped_column(String(8), default="en")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AlertDelivery(Base):
+    __tablename__ = "alert_deliveries"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=new_uuid)
+    alert_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("alerts.id"), index=True)
+    subscription_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("subscriptions.id"), index=True)
+    status: Mapped[str] = mapped_column(String(16))  # sent | failed
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 Index("ix_reports_cell_time", Report.h3_cell, Report.created_at)
 Index("ix_readings_station_var_time", SensorReading.station_id, SensorReading.variable, SensorReading.time)
+Index("ix_subscriptions_channel_address", Subscription.channel, Subscription.address, unique=True)
+Index("ix_alerts_incident_status", Alert.incident_id, Alert.status)
