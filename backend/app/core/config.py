@@ -47,6 +47,28 @@ class Settings(BaseSettings):
     # H3 k-ring radius (res 8) used to build a subscriber's geofence from one point.
     subscription_radius_rings: int = 10
 
+    # Delivery worker (phase 1, milestone 2): alert issuance enqueues here rather
+    # than blocking on channel I/O; the worker process drains it.
+    delivery_queue_key: str = "oceanping:alert_deliveries"
+    delivery_queue_timeout_seconds: int = 5
+
+    # Web push (VAPID). Empty public key means the frontend won't offer browser
+    # alerts and the worker skips web_push subscriptions.
+    vapid_public_key: str = ""
+    vapid_private_key: str = ""
+    vapid_admin_email: str = "admin@oceanping.example"
+
+    # SMS: "console" (log only, default/local), "twilio", or "exotel". Both
+    # provider adapters speak plain HTTPS so no extra SDK dependency is needed.
+    sms_provider: str = "console"
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_from_number: str = ""
+    exotel_sid: str = ""
+    exotel_token: str = ""
+    exotel_from_number: str = ""
+    exotel_subdomain: str = "api.exotel.com"
+
     class Config:
         env_file = ".env"
         extra = "ignore"

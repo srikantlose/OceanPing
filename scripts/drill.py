@@ -18,6 +18,7 @@ import json
 import math
 import random
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -67,6 +68,17 @@ def call(api: str, path: str, *, method: str = "GET", token: str | None = None,
         raise SystemExit(f"HTTP {exc.code} on {method} {path}: {body}") from exc
 
 
+def poll_deliveries(api: str, token: str, alert_id: str, attempts: int = 10, delay: float = 1.0) -> list:
+    """The delivery worker is a separate process draining a queue — give it a
+    few seconds to pick the alert up before declaring no delivery happened."""
+    for _ in range(attempts):
+        deliveries = call(api, f"/analyst/alerts/{alert_id}/deliveries", token=token)
+        if deliveries:
+            return deliveries
+        time.sleep(delay)
+    return []
+
+
 def main() -> None:
     # Windows consoles often default to cp1252; keep the drill output portable.
     if hasattr(sys.stdout, "reconfigure"):
@@ -100,6 +112,10 @@ def main() -> None:
                                 "lat": DRILL_STATION["lat"], "lon": DRILL_STATION["lon"]},
                              "variable": "water_level", "points": points})
     print(f"   inserted {result['inserted']} readings")
+
+    print("→ Subscribing a drill phone number to SMS alerts near the Marina…")
+    call(args.api, "/subscribe/sms", method="POST",
+         json_body={"lat": MARINA[0], "lon": MARINA[1], "phone": "+911234500000", "lang": "en"})
 
     print(f"→ Submitting {len(REPORT_TEXTS)} citizen reports around Chennai Marina…")
     for i, (hazard, text) in enumerate(REPORT_TEXTS):
@@ -148,6 +164,16 @@ def main() -> None:
     print(f"   {len(active_alerts)} active alert(s); none auto-escalated to warning "
           "(warning is analyst-only, as designed)")
 
+    if active_alerts:
+        print("→ Checking the delivery worker fanned the auto-proposed alert out to the drill subscriber…")
+        deliveries = poll_deliveries(args.api, token, active_alerts[0]["id"])
+        assert deliveries, (
+            f"No delivery attempts recorded for alert {active_alerts[0]['id'][:8]} — "
+            "is the delivery worker (docker compose service `worker`) running?"
+        )
+        d = deliveries[0]
+        print(f"   {len(deliveries)} delivery attempt(s), e.g. [{d['status']}] via {d['channel']} to {d['address']}")
+
     if incidents:
         biggest = max(incidents, key=lambda i: i["report_count"])
         print(f"→ Analyst issues a WARNING for the incident with {biggest['report_count']} merged reports…")
@@ -158,6 +184,11 @@ def main() -> None:
         assert any(f["properties"]["id"] == warning["id"] for f in public_alerts["features"]), \
             "issued warning did not appear on the public alert map"
         print(f"   public map now shows {len(public_alerts['features'])} active alert(s), incl. the warning")
+
+        print("→ Checking the warning itself was fanned out to subscribers…")
+        deliveries = poll_deliveries(args.api, token, warning["id"])
+        assert deliveries, f"No delivery attempts recorded for the issued warning {warning['id'][:8]}"
+        print(f"   {len(deliveries)} delivery attempt(s) recorded for the warning")
 
         print(f"→ Analyst expires alert {warning['id'][:8]}…")
         call(args.api, f"/analyst/alerts/{warning['id']}/expire", method="POST", token=token, json_body={})

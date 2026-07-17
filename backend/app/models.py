@@ -205,11 +205,15 @@ class Subscription(Base):
     __tablename__ = "subscriptions"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=new_uuid)
-    channel: Mapped[str] = mapped_column(String(16))  # telegram (web_push, sms in phase 2)
-    address: Mapped[str] = mapped_column(String(256))  # e.g. telegram chat id
+    channel: Mapped[str] = mapped_column(String(16))  # telegram | web_push | sms
+    # Stable identifier per channel: telegram chat id, SMS phone number, or a
+    # sha256 hash of the push endpoint (the endpoint itself lives in `meta` —
+    # it can exceed this column's length and isn't needed for lookups).
+    address: Mapped[str] = mapped_column(String(256))
     h3_cells: Mapped[list] = mapped_column(JSONB, default=list)  # geofence cell set
     min_tier: Mapped[str] = mapped_column(String(16), default="advisory")
     lang: Mapped[str] = mapped_column(String(8), default="en")
+    meta: Mapped[dict] = mapped_column(JSONB, default=dict)  # channel-specific extra data
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.db import SessionLocal
 from app.core.scheduler import build_scheduler
 from app.modules.alerts.router import router as alerts_router
+from app.modules.delivery.router import router as delivery_router
 from app.modules.analyst.router import router as analyst_router
 from app.modules.drill.router import router as drill_router
 from app.modules.geo.router import router as geo_router
@@ -48,6 +49,7 @@ app.include_router(ingest_router)
 app.include_router(geo_router)
 app.include_router(analyst_router)
 app.include_router(alerts_router)
+app.include_router(delivery_router)
 app.include_router(drill_router)
 
 

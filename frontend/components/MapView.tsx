@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { API_BASE } from "@/lib/api";
@@ -13,6 +13,7 @@ import {
   STATUS_COLORS,
 } from "@/lib/palette";
 import { sparklineSVG } from "@/lib/sparkline";
+import { browserAlertsSupported, subscribeToBrowserAlerts } from "@/lib/webpush";
 
 const REFRESH_MS = 15_000;
 const CHENNAI: [number, number] = [80.2824, 13.05];
@@ -58,6 +59,22 @@ async function fetchFC(path: string) {
 export default function MapView() {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
+  const [subStatus, setSubStatus] = useState<"idle" | "pending" | "done" | "error">("idle");
+  const [subError, setSubError] = useState<string | null>(null);
+
+  const handleSubscribe = async () => {
+    if (!mapRef.current) return;
+    setSubStatus("pending");
+    setSubError(null);
+    try {
+      const center = mapRef.current.getCenter();
+      await subscribeToBrowserAlerts(center.lat, center.lng);
+      setSubStatus("done");
+    } catch (err: any) {
+      setSubStatus("error");
+      setSubError(err?.message || "Could not subscribe.");
+    }
+  };
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -321,6 +338,28 @@ export default function MapView() {
           <span className="legend-swatch" style={{ background: STATUS_COLORS.verified }} />
           Verified only on this map
         </div>
+        {browserAlertsSupported() && (
+          <>
+            <h4 style={{ marginTop: 8 }}>Browser alerts</h4>
+            <button
+              className="primary"
+              style={{ width: "100%", fontSize: 12 }}
+              onClick={handleSubscribe}
+              disabled={subStatus === "pending" || subStatus === "done"}
+            >
+              {subStatus === "done"
+                ? "🔔 Subscribed to this view"
+                : subStatus === "pending"
+                ? "Subscribing…"
+                : "🔔 Get alerts for this view"}
+            </button>
+            {subStatus === "error" && (
+              <div className="spark-caption" style={{ color: INK.critical }}>
+                {subError}
+              </div>
+            )}
+          </>
+        )}
       </div>
     </>
   );

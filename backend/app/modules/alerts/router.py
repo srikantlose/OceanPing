@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.db import get_db
 from app.core.security import require_analyst
-from app.models import Alert, Incident
+from app.models import Alert, AlertDelivery, Incident, Subscription
 from app.modules.alerts.service import expire_alert, issue_warning
 from app.modules.geo.h3utils import cell_polygon
 
@@ -70,6 +70,34 @@ def list_alerts(
 ) -> list[dict]:
     alerts = db.scalars(select(Alert).order_by(Alert.created_at.desc()).limit(min(limit, 500))).all()
     return [_alert_out(a) for a in alerts]
+
+
+@router.get("/analyst/alerts/{alert_id}/deliveries")
+def list_alert_deliveries(
+    alert_id: uuid.UUID,
+    _: str = Depends(require_analyst),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    """Delivery attempts for one alert — lets an analyst (or the drill) confirm
+    the queued worker actually fanned it out, not just that it was issued."""
+    rows = db.scalars(
+        select(AlertDelivery).where(AlertDelivery.alert_id == alert_id).order_by(AlertDelivery.attempted_at.desc())
+    ).all()
+    out = []
+    for d in rows:
+        sub = db.get(Subscription, d.subscription_id)
+        out.append(
+            {
+                "id": str(d.id),
+                "subscription_id": str(d.subscription_id),
+                "channel": sub.channel if sub else None,
+                "address": sub.address if sub else None,
+                "status": d.status,
+                "detail": d.detail,
+                "attempted_at": d.attempted_at.isoformat(),
+            }
+        )
+    return out
 
 
 @router.get("/map/alerts")

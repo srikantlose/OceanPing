@@ -1,20 +1,20 @@
 """Alert lifecycle: automatic advisory/watch proposals from incident state,
-analyst-only warnings, expiry, and Telegram broadcast to geofenced subscribers.
+analyst-only warnings, expiry, and fan-out to geofenced subscribers.
 
-Milestone-1 scope: broadcast runs synchronously (in-process, best-effort) —
-phase 1's later milestone moves this to a queued worker so delivery never
-blocks report ingestion under real load.
+Delivery itself is queued (see `modules/delivery/`) — this module only
+decides tier and enqueues the alert id, so a slow or down channel provider
+never blocks report ingestion or scoring.
 """
 import logging
 from datetime import datetime, timedelta, timezone
 
-import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.models import Alert, AlertDelivery, Incident, Subscription
+from app.models import Alert, Incident
 from app.modules.alerts import engine
+from app.modules.delivery.queue import enqueue_alert
 from app.modules.scoring.audit import append_audit
 
 log = logging.getLogger(__name__)
@@ -87,7 +87,7 @@ def sync_incident_alert(db: Session, incident: Incident) -> Alert | None:
 
     append_audit(db, event_type=event_type, subject_type="alert", subject_id=str(alert.id), payload=payload)
     db.flush()
-    _broadcast(db, alert)
+    enqueue_alert(alert.id)
     return alert
 
 
@@ -130,7 +130,7 @@ def issue_warning(
 
     append_audit(db, event_type=event_type, subject_type="alert", subject_id=str(alert.id), payload=payload)
     db.commit()
-    _broadcast(db, alert)
+    enqueue_alert(alert.id)
     return alert
 
 
@@ -142,40 +142,3 @@ def expire_alert(db: Session, alert: Alert, analyst: str) -> Alert:
     )
     db.commit()
     return alert
-
-
-def _broadcast(db: Session, alert: Alert) -> None:
-    """Best-effort Telegram push to subscribers whose geofence intersects the
-    alert's cells and whose min_tier is met. Failures never raise — a
-    delivery outage must not block scoring/ingest."""
-    token = get_settings().telegram_bot_token
-    if not token:
-        return
-    alert_cells = set(alert.h3_cells or [])
-    if not alert_cells:
-        return
-    subs = db.scalars(select(Subscription).where(Subscription.channel == "telegram")).all()
-    for sub in subs:
-        if engine.TIER_RANK.get(sub.min_tier, 0) > engine.TIER_RANK[alert.tier]:
-            continue
-        if not (set(sub.h3_cells or []) & alert_cells):
-            continue
-        text = alert.message.get(sub.lang) or alert.message.get("en", "")
-        status, detail = "sent", None
-        try:
-            resp = httpx.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": sub.address, "text": text},
-                timeout=10,
-            )
-            resp.raise_for_status()
-        except Exception as exc:
-            status, detail = "failed", str(exc)[:500]
-            log.warning("Alert delivery failed for subscription %s: %s", sub.id, exc)
-        db.add(
-            AlertDelivery(
-                alert_id=alert.id, subscription_id=sub.id, status=status, detail=detail,
-                attempted_at=_utcnow(),
-            )
-        )
-    db.commit()

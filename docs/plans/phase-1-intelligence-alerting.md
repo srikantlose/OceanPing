@@ -1,6 +1,6 @@
 # Phase 1 — Intelligence Core & Tiered Alerting (blueprint weeks 7–14, gap plan)
 
-**Status: 🟡 in progress — Milestone 1 built (July 2026).** Prereq: phase 0 (built).
+**Status: 🟡 in progress — Milestones 1 & 2 built (July 2026).** Prereq: phase 0 (built).
 Everything here stays inside the monolith.
 
 ## Milestone 1 — as built
@@ -41,6 +41,43 @@ affect correctness of the escalation gate — reports never reach `verified`/`wa
 without a human regardless of anomaly flapping — but worth instrumenting further (e.g.
 audit-log every active-state transition, including refreshes) before phase 2 leans
 harder on instrument corroboration.
+
+## Milestone 2 — as built
+
+The delivery fan-out worker replaces Milestone 1's synchronous in-process broadcast:
+
+- `backend/app/modules/delivery/queue.py` — `enqueue_alert()` / `dequeue_alert()`, a
+  best-effort Redis list queue (`oceanping:alert_deliveries`, configurable). Enqueue never
+  raises — a Redis outage logs a warning and lets report ingestion/scoring proceed.
+- `backend/app/modules/delivery/adapters.py` — one `send(alert, subscription) ->
+  DeliveryResult` contract: `TelegramAdapter`, `WebPushAdapter` (`pywebpush` + VAPID keys),
+  and SMS via `ConsoleAdapter` (local default) / `TwilioAdapter` / `ExotelAdapter`, picked
+  by `settings.sms_provider`.
+- `backend/app/modules/delivery/worker.py` — standalone process (`python -m
+  app.modules.delivery.worker`, its own compose service) draining the queue and fanning out
+  to matching subscriptions (geofence + min-tier filter), recording every attempt in
+  `alert_deliveries`.
+- `backend/app/modules/delivery/router.py` — `POST /subscribe/web-push`,
+  `POST /subscribe/sms` (+ unsubscribe counterparts), `GET /subscribe/vapid-public-key`.
+- `Subscription.meta` JSONB column (migration `0003_delivery.py`) holds channel-specific
+  extras (the web-push `push_subscription` blob) without growing the core columns.
+- Frontend: `frontend/public/sw.js` + `frontend/lib/webpush.ts` wire a browser "Enable
+  alerts" button to the web-push subscribe endpoint.
+- Tests: `test_delivery_adapters.py`, `test_delivery_queue.py`, `test_delivery_worker.py`.
+
+**Race condition found and fixed:** `alerts/service.py::sync_incident_alert()` is called
+from inside `scoring/service.py::rescore_recent()`'s per-report loop, which calls
+`db.commit()` **once**, after the loop — so `enqueue_alert()` fires (and the worker can
+dequeue) before the issuing transaction actually commits. A worker reading the alert row on
+its own connection could see nothing yet under a plain `db.get()`. Rather than restructure
+the batch-commit pattern (used deliberately for performance), `worker.py` treats the lookup
+as eventually consistent: `_load_alert_with_retries()` retries up to 5 times with a 0.2s
+backoff, which is safe under Postgres's default READ COMMITTED isolation (`core/db.py` — no
+override) since each retry gets a fresh snapshot. Covered by
+`test_load_alert_with_retries_rides_out_the_commit_race` and
+`..._gives_up_after_max_attempts`; verified live via `scripts/drill.py`, which polls
+`/analyst/alerts/{id}/deliveries` after both the auto-proposed alert and the analyst-issued
+warning and asserts delivery attempts landed.
 
 ## Remaining milestones (unchanged from original plan below)
 
@@ -139,7 +176,7 @@ Compose service `worker` (same backend image). Optional: `faster-whisper` model 
 ## Milestones
 
 1. ✅ Alerts module + composer UI + public alert layer (Telegram broadcast only)
-2. Delivery worker + subscriptions + web push + SMS stub
+2. ✅ Delivery worker + subscriptions + web push + SMS stub
 3. Whisper voice reports through the bot
 4. Training export + retrain script + MuRIL swap behind `classify()`
 5. Hearsay signal into scoring + correction UI

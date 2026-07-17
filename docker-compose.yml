@@ -36,6 +36,7 @@ services:
       SECRET_KEY: ${SECRET_KEY:-dev-secret-change-me}
       NLP_MODE: ${NLP_MODE:-embedding}
       ERDDAP_POLL_MINUTES: ${ERDDAP_POLL_MINUTES:-10}
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
     ports:
       - "8000:8000"
     volumes:
@@ -47,6 +48,29 @@ services:
       redis:
         condition: service_healthy
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+  worker:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://oceanping:oceanping@db:5432/oceanping
+      REDIS_URL: redis://redis:6379/0
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      SMS_PROVIDER: ${SMS_PROVIDER:-console}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
+      EXOTEL_SID: ${EXOTEL_SID:-}
+      EXOTEL_TOKEN: ${EXOTEL_TOKEN:-}
+      EXOTEL_FROM_NUMBER: ${EXOTEL_FROM_NUMBER:-}
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+      VAPID_ADMIN_EMAIL: ${VAPID_ADMIN_EMAIL:-admin@oceanping.example}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: python -m app.modules.delivery.worker
 
   bot:
     build: ./backend
