@@ -1,6 +1,6 @@
 # Phase 1 — Intelligence Core & Tiered Alerting (blueprint weeks 7–14, gap plan)
 
-**Status: 🟡 in progress — Milestones 1 & 2 built (July 2026).** Prereq: phase 0 (built).
+**Status: 🟡 in progress — Milestones 1–3 built (July 2026).** Prereq: phase 0 (built).
 Everything here stays inside the monolith.
 
 ## Milestone 1 — as built
@@ -78,6 +78,35 @@ override) since each retry gets a fresh snapshot. Covered by
 `..._gives_up_after_max_attempts`; verified live via `scripts/drill.py`, which polls
 `/analyst/alerts/{id}/deliveries` after both the auto-proposed alert and the analyst-issued
 warning and asserts delivery attempts landed.
+
+## Milestone 3 — as built
+
+Voice notes sent to the Telegram bot now become report text instead of requiring typing:
+
+- `backend/app/modules/ingest/voice.py` — `transcribe(audio_bytes) -> str | None`, lazy-loads
+  a `faster-whisper` (CTranslate2, CPU-only) model on first use, mirroring the
+  lazy-singleton pattern already used by `nlp/classifier.py::_load_model()`. Best-effort by
+  design: a failed load or bad decode returns `None` rather than raising, so a voice note
+  degrades to a photo-only report instead of breaking the bot conversation. Model choice
+  (`whisper_model_size`, default `"small"`) and device/compute type are config (`core/config.py`),
+  no code change needed to size up for accuracy vs. a Raspberry-Pi-class deployment.
+- `backend/app/modules/ingest/bot_runner.py` — new `on_voice` handler registered in the
+  `DESCRIPTION` conversation state (`filters.VOICE`, alongside the existing text handler);
+  downloads the voice OGG, transcribes off the event loop via `asyncio.to_thread`, and feeds
+  the transcript into the same `context.user_data["text"]` the typed-description path uses —
+  so classification, language detection, and scoring treat a voice report identically to a
+  typed one from `create_report()`'s perspective.
+- Tests: `test_voice_transcription.py` — covers segment joining, empty-transcript handling,
+  decode-error fallback, and that a failed model load is cached (`_model_failed`) rather than
+  retried on every voice note.
+
+**Not yet done from the original plan:** Bhashini ASR as a configurable alternative — deferred
+until there's a concrete need for a hosted-API fallback (faster-whisper's multilingual
+support already covers the drill script's Tamil/Hindi/English mix reasonably well offline).
+**Not verified live:** no `TELEGRAM_BOT_TOKEN` is configured in this environment, so the bot
+process doesn't run here — the transcription unit is verified, but an actual "send a Tamil
+voice note to the bot" pass is still open per this plan's Verification section, to be done by
+whoever configures a real bot token.
 
 ## Remaining milestones (unchanged from original plan below)
 
@@ -177,7 +206,7 @@ Compose service `worker` (same backend image). Optional: `faster-whisper` model 
 
 1. ✅ Alerts module + composer UI + public alert layer (Telegram broadcast only)
 2. ✅ Delivery worker + subscriptions + web push + SMS stub
-3. Whisper voice reports through the bot
+3. ✅ Whisper voice reports through the bot
 4. Training export + retrain script + MuRIL swap behind `classify()`
 5. Hearsay signal into scoring + correction UI
 

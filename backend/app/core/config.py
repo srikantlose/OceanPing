@@ -15,6 +15,12 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str = ""
 
+    # Voice-note transcription (phase 1, milestone 3): faster-whisper, CPU-only.
+    # "small" is multilingual and runs acceptably on CPU; bump for accuracy.
+    whisper_model_size: str = "small"
+    whisper_device: str = "cpu"
+    whisper_compute_type: str = "int8"
+
     # "embedding" uses sentence-transformers; "keyword" is a light fallback.
     nlp_mode: str = "embedding"
     embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"

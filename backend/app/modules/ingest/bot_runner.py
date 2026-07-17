@@ -32,6 +32,7 @@ from app.core.config import get_settings
 from app.core.db import SessionLocal
 from app.models import HAZARD_TYPES, Subscription
 from app.modules.alerts.geofence import cells_around
+from app.modules.ingest import voice
 from app.modules.ingest.service import RateLimited, create_report
 
 logging.basicConfig(level=logging.INFO)
@@ -186,6 +187,20 @@ async def skip_description(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     return PHOTO
 
 
+async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    file = await update.message.voice.get_file()
+    audio_bytes = bytes(await file.download_as_bytearray())
+    await update.message.reply_text("🎙️ Transcribing your voice note…")
+    transcript = await asyncio.to_thread(voice.transcribe, audio_bytes)
+    context.user_data["text"] = transcript
+    if transcript:
+        await update.message.reply_text(f"Heard: “{transcript}”")
+    else:
+        await update.message.reply_text("Couldn't transcribe that — continuing without a description.")
+    await update.message.reply_text("Send a photo of the hazard (or /skip):")
+    return PHOTO
+
+
 async def _submit(update: Update, context: ContextTypes.DEFAULT_TYPE,
                   media_bytes: bytes | None) -> int:
     user = update.effective_user
@@ -256,6 +271,7 @@ def main() -> None:
             HAZARD: [CallbackQueryHandler(on_hazard, pattern=r"^hz:")],
             DESCRIPTION: [
                 CommandHandler("skip", skip_description),
+                MessageHandler(filters.VOICE, on_voice),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, on_description),
             ],
             PHOTO: [
