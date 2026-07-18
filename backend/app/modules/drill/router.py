@@ -11,6 +11,7 @@ from app.core.redisclient import get_redis
 from app.core.security import require_analyst
 from app.models import Station
 from app.modules.geo.hotspots import CACHE_KEY as HOTSPOT_CACHE_KEY
+from app.modules.satellite.service import poll_satellite
 from app.modules.scoring.service import rescore_recent
 from app.modules.sensors.service import detect_anomalies, insert_readings
 
@@ -56,12 +57,13 @@ def inject_readings(
 
 @router.post("/tick")
 def tick(_: str = Depends(require_analyst), db: Session = Depends(get_db)) -> dict:
-    """Run anomaly detection + rescoring immediately instead of waiting for
-    the scheduler — keeps drills and demos snappy."""
+    """Run anomaly detection + satellite polling + rescoring immediately
+    instead of waiting for the scheduler — keeps drills and demos snappy."""
     detect_anomalies(db)
+    satellite_observed = poll_satellite(db)
     rescored = rescore_recent(db)
     try:  # drop the cached hotspot layer so the drill sees fresh clusters
         get_redis().delete(HOTSPOT_CACHE_KEY)
     except Exception:
         pass
-    return {"rescored_reports": rescored}
+    return {"rescored_reports": rescored, "satellite_observations": satellite_observed}

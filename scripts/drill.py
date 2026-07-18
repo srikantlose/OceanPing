@@ -43,6 +43,10 @@ REPORT_TEXTS = [
     (None, "समुद्र की लहरें दीवार के ऊपर से आ रही हैं, पानी भर गया"),
     ("coastal_flooding", "sea water everywhere near the memorial, rising fast"),
     ("coastal_flooding", "vellam vandhuruchu marina kitta, help pannunga"),
+    # oil_spill has no instrument signal at all (HAZARD_VARIABLES is empty for it) —
+    # satellite is its only corroboration path, exercised via the StubProvider below.
+    ("oil_spill", "black oil slick spreading near the harbour, strong diesel smell"),
+    ("oil_spill", "large oil spill spotted near the fishing jetty, water has turned black"),
 ]
 
 
@@ -132,9 +136,10 @@ def main() -> None:
         print(f"   [{rep['status']:>11}] conf={rep['confidence']:.2f} "
               f"{rep['hazard_type']:<17} lang={rep['lang']:<5} \"{text[:48]}…\"")
 
-    print("→ Forcing pipeline tick (anomaly detection + rescore)…")
+    print("→ Forcing pipeline tick (anomaly detection + satellite poll + rescore)…")
     tick = call(args.api, "/drill/tick", method="POST", token=token)
-    print(f"   rescored {tick['rescored_reports']} reports")
+    print(f"   rescored {tick['rescored_reports']} reports, "
+          f"{tick['satellite_observations']} satellite observation(s) recorded")
 
     print("→ Post-tick state:")
     reports = call(args.api, "/analyst/reports?limit=20", token=token)
@@ -143,12 +148,23 @@ def main() -> None:
         c = r["confidence_components"]
         print(f"   [{r['status']:>11}] conf={r['confidence']:.2f} "
               f"(trust={c.get('trust', 0):.2f} coher={c.get('coherence', 0):.2f} "
-              f"instr={c.get('instrument', 0):.2f} media={c.get('media', 0):.2f}) "
+              f"instr={c.get('instrument', 0):.2f} media={c.get('media', 0):.2f} "
+              f"sat={c.get('satellite', 0):.2f} acct={c.get('account_device', 0):.2f}) "
               f"{r['hazard_type']}")
     incidents = call(args.api, "/analyst/incidents", token=token)
     print(f"   {len(reports)} reports → {len(incidents)} incidents "
           f"(largest merges {max((i['report_count'] for i in incidents), default=0)} reports); "
           f"{len(corroborated)} auto-corroborated by the tide gauge")
+
+    print("→ Checking satellite corroboration for the oil-spill reports (no instrument signal exists for that hazard)…")
+    oil_reports = [r for r in reports if r["hazard_type"] == "oil_spill"]
+    assert oil_reports, "expected at least one oil_spill report — did classification or the form tag change?"
+    for r in oil_reports:
+        obs = r["confidence_components"].get("detail", {}).get("satellite_observations") or []
+        assert obs, f"oil_spill report {r['id'][:8]} has no satellite observation — StubProvider not wired?"
+        assert r["confidence_components"]["instrument"] == 0, "oil_spill should never get an instrument signal"
+    print(f"   {len(oil_reports)} oil_spill report(s) each have a satellite observation "
+          "(their only possible corroboration path)")
 
     hotspots = call(args.api, "/map/hotspots")
     print(f"   hotspots on map: {len(hotspots['features'])}")

@@ -1,8 +1,111 @@
 # Phase 2 — Fusion & Reach (blueprint weeks 15–24, gap plan)
 
-**Status: 🔲 planned.** Prereqs: phase 0 (built); phase 1 delivery worker for new channels.
+**Status: 🟡 in progress (July 2026).** Milestone 2 (satellite + six-signal rebalance)
+built. Milestone 1 (INCOIS real datasets) investigated and found blocked on external data
+availability — see below — deferred rather than faked. Prereqs: phase 0 (built); phase 1
+delivery worker for new channels.
 **Independent items** (can land before phase 1 completes): satellite corroboration, INCOIS
 dataset IDs, station config → DB, RAG chatbot.
+
+## Milestone 1 — investigated, deferred (not built)
+
+Live-queried `https://erddap.incois.gov.in/erddap/tabledap/` (the exact URL this plan
+names) before writing any code, since "fill real dataset IDs" only means something if a
+real matching dataset exists. It doesn't, as of this investigation:
+
+- The server is reachable and has 18 real datasets, but only **one** is a `tabledap`
+  (station/timeseries CSV — the shape `sensors/erddap.py` parses) dataset:
+  `Indian_ARGO_Floats`. Everything else is `griddap` (gridded satellite/model products —
+  AMSR-E, ASCAT wind, OceanSat OCM chlorophyll, SST), a fundamentally different query
+  shape than the per-station CSV `build_url()`/`fetch_readings()` expect.
+- `Indian_ARGO_Floats` is deep-ocean ARGO float profile data (subsurface temperature/
+  salinity/pressure from drifting floats), not coastal tide/wave stations — a poor fit for
+  "corroborate a coastal citizen report" regardless of format. Its data also ends
+  2025-04-23 — over a year stale as of this check, not a live feed.
+- **There is no real INCOIS tide-gauge/water-level tabledap dataset to fill into the
+  `incois-chennai-tide` stub in `stations.json`.** It stays a disabled template with its
+  honest `REPLACE_WITH_DATASET_ID` placeholder; the NDBC demo station remains the only
+  live instrument feed. `station_configs` table + CRUD (the other half of this milestone)
+  wasn't built either, since it's only worth doing alongside real data to manage.
+
+**Revisit when:** INCOIS opens a tide-gauge dataset on this ERDDAP instance, or a
+different real-time coastal feed is identified (a state tide-gauge network, a different
+INCOIS API/portal outside ERDDAP, etc.). The griddap satellite/wind/chlorophyll datasets
+already on this server are a closer match to milestone 2's satellite work than to
+milestone 1's station-corroboration goal.
+
+## Milestone 2 — as built
+
+Satellite corroboration and the six-signal rebalance are live:
+
+- `backend/app/models.py` — `SatelliteObservation` (incident_id, provider, recipe, score,
+  scene_time, scene_url). Migration `0006_satellite.py` (follows `0004`'s
+  `Base.metadata.create_all` pattern for a new table).
+- `backend/app/modules/satellite/providers.py` — `SatelliteProvider` Protocol +
+  `HAZARD_RECIPES` (oil_spill, algal_bloom, coastal_flooding, storm_surge only —
+  deliberately excludes fast hazards like tsunami/rip_current, so satellite can never gate
+  them). `StubProvider` is deterministic (sha256 of `incident_id:recipe`) and needs no
+  credentials — it's the only provider actually exercised here. `SentinelHubProvider` /
+  `EarthEngineProvider` have the real interface shape and a real credential gate (same
+  pattern as `delivery/adapters.py`'s Twilio/Exotel adapters), but the actual scene-scoring
+  recipe (deriving a dark-slick/NDCI/water-extent score from raw Sentinel imagery) is a
+  raster-processing task this environment has no account or way to verify — deferred
+  rather than shipped as unverified "real" code, same honest-scoping call as milestones 4
+  and 5 made elsewhere in this project.
+- `backend/app/modules/satellite/service.py::poll_satellite()` — for each incident seen in
+  the last `satellite_active_incident_hours` (default 24h) whose hazard has a recipe, asks
+  the configured provider for an observation and records it. Provider exceptions are
+  caught per-incident (mirrors `sensors/service.py`'s resilience) so one bad call can't
+  drop the rest of the batch.
+- `backend/app/core/scheduler.py` — new `satellite_poll` job (`satellite_poll_minutes`,
+  default 60 — satellite passes are hours apart, this doesn't need ERDDAP's cadence).
+  `backend/app/modules/drill/router.py::/drill/tick` also force-runs it, same as anomaly
+  detection, so drills don't wait an hour.
+- `backend/app/modules/scoring/engine.py` — `WEIGHTS` rebalanced to the blueprint's
+  six-signal table (trust .20, coherence .25, instrument .25, media .15, satellite .10,
+  account_device .05). New pure functions `satellite_score()` (strongest observation, 0
+  with none yet — absence of evidence isn't evidence against, same call `instrument_score`
+  already makes) and `account_device_score()` (older accounts score higher, saturating at a
+  week; a burst of reports from the same account inside the existing rate-limit window
+  pulls the score down, capped at a 0.5 penalty).
+- `backend/app/modules/scoring/service.py` — `rescore_report()` now also gathers
+  `_satellite_observations()` (queries `SatelliteObservation` by incident + recipe) and
+  `_account_device_score()` (reporter age + the same Redis `rl:rep:` burst counter
+  `ingest/service.py`'s rate limiter already maintains — no new I/O path). **The
+  escalation gate now reads `instrument > 0 or satellite > 0`** instead of instrument
+  alone: oil_spill and algal_bloom have zero instrument variables (`HAZARD_VARIABLES` was
+  already commented "needs satellite/CV" before this milestone), so without this change
+  satellite could contribute to their confidence score but could never actually let them
+  reach "corroborated" — the gate change is what makes satellite a real second
+  corroboration stream rather than a number that never matters. Fast hazards
+  (tsunami/rip_current/high_waves) have no satellite recipe at all, so their gate is
+  unchanged — still instrument-only, never waits on an hours-latency scene.
+- `frontend/components/AnalystDashboard.tsx` — `COMPONENT_LABELS` gained `satellite` and
+  `account_device` so both render as confidence bars; a new detail line surfaces satellite
+  observations the same way corroborating instrument anomalies already do.
+- `scripts/drill.py` — two oil_spill report texts added (oil_spill has no instrument
+  signal at all, so it's the clearest live proof satellite corroboration works); the
+  post-tick display now prints `sat=`/`acct=` alongside the existing components; a new
+  assertion confirms every oil_spill report picked up a satellite observation and that its
+  instrument component is exactly 0.
+- Tests: `test_satellite_providers.py` (StubProvider determinism/range, credential-gated
+  skip for both real provider shells, HAZARD_RECIPES excludes fast hazards),
+  `test_satellite_service.py` (recipe filtering, provider-exception resilience, `None`
+  observations skipped — fake db/provider objects, no real DB touched, per this suite's
+  convention), `test_scoring_engine.py` additions (`satellite_score`,
+  `account_device_score`, updated six-weight `combine()` expectations), `test_scoring_
+  service.py` additions (`_satellite_observations` incident/recipe filtering and row
+  serialization, `_account_device_score`'s Redis-backed and Redis-unavailable paths).
+
+**Verified live, not just under mocks:** rebuilt both images (build-time `COPY`, same as
+every prior milestone) and ran `scripts/drill.py` clean end-to-end. Confirmed via the
+drill's own new assertions that both oil_spill reports got a real satellite observation
+each (`instr=0.00`, `sat=0.64`) — the only corroboration path that hazard has. Checked
+backend logs for the run: no exceptions from `poll_satellite` or the rescore path.
+Confirmed the scheduler registered all five jobs (including `satellite_poll`) cleanly at
+startup. Confirmed the frontend's compiled JS bundle contains the new `Account/device`
+label (a build-time proxy check — no browser-automation tool was available in this
+session to click through the dashboard itself, same limitation noted in milestone 5).
 
 ## Goals
 
@@ -102,14 +205,19 @@ drills, or (c) the phase-3 service split begins. Record the decision here when t
 - Meta WhatsApp verification: weeks of lead time — start first, don't block the phase.
 - Earth Engine/Sentinel Hub quotas & auth: StubProvider keeps local dev free; budget for
   Sentinel Hub if EE research terms don't fit.
+- ✅ **Realized** (not just a risk anymore): INCOIS's public ERDDAP has no real coastal
+  tide-gauge tabledap dataset as of this investigation (see milestone 1) — the "fill in
+  real dataset IDs" item is blocked on external data availability, not on our code.
 - INCOIS ERDDAP flakiness: poller already fails soft per-station; keep NOAA demo station
   as canary.
 - Valhalla memory footprint: pilot-district extracts only, not all-India.
 
 ## Milestones
 
-1. INCOIS real datasets + station config in DB (independent, do first)
-2. Satellite module with StubProvider + six-signal rebalance
+1. 🔲 INCOIS real datasets + station config in DB — investigated, blocked: no real
+   coastal tide-gauge dataset exists on INCOIS's public ERDDAP (see milestone 1's "as
+   built" section above). Revisit if that changes.
+2. ✅ Satellite module with StubProvider + six-signal rebalance
 3. RAG chatbot (web + Telegram)
 4. Channel-agnostic conversation core + WhatsApp adapter + IVR webhook
 5. Fisherman mode (roles, PFZ surfaces)
@@ -117,8 +225,10 @@ drills, or (c) the phase-3 service split begins. Record the decision here when t
 
 ## Verification
 
-- Drill additions: synthetic oil-spill incident + stub satellite observation → satellite
-  component appears in `confidence_components`; six-weight tests updated.
+- ✅ Drill additions: synthetic oil-spill reports + StubProvider satellite observation →
+  satellite component appears in `confidence_components`, instrument stays exactly 0,
+  and the assertion is live in `scripts/drill.py` (not just a mocked unit test); six-weight
+  tests updated in `test_scoring_engine.py`.
 - Chat eval set: ~30 questions incl. adversarial ("should I evacuate?") — assert fallback
   behavior; retrieval-threshold unit test.
 - IVR: simulated webhook payload → report with `source="ivr"` and correct village geocode.

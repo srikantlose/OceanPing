@@ -44,18 +44,44 @@ def test_media_forensics_scores():
     assert engine.media_score(True, exif_gps_km=0.5, exif_time_offset_hours=0.2) == 1.0
 
 
+def test_satellite_score():
+    assert engine.satellite_score([]) == 0.0
+    assert engine.satellite_score([0.3]) == 0.3
+    assert engine.satellite_score([0.2, 0.7, 0.4]) == 0.7  # strongest observation wins
+
+
+def test_account_device_score():
+    # A week-old (or older) account with just this one report scores full marks.
+    assert engine.account_device_score(24 * 7, 1) == 1.0
+    assert engine.account_device_score(24 * 30, 1) == 1.0
+    # Brand new account, single report — no burst penalty yet, just low age.
+    assert engine.account_device_score(0, 1) == 0.0
+    # A burst of reports from the same account pulls the score down regardless of age.
+    assert engine.account_device_score(24 * 7, 3) == approx(1.0 - 2 * 0.15)
+    assert engine.account_device_score(24 * 7, 100) == 0.5  # penalty caps at 0.5
+    assert engine.account_device_score(0, 100) == 0.0  # never goes negative
+
+
 def test_combine_bounds_and_blend():
     assert engine.combine({}) == 0.0
     assert engine.combine({k: 1.0 for k in engine.WEIGHTS}) == 1.0
     mid = engine.combine({"trust": 0.5, "coherence": 1.0, "instrument": 1.0, "media": 0.5})
-    assert abs(mid - (0.125 + 0.30 + 0.30 + 0.075)) < 1e-6
+    assert abs(mid - (0.10 + 0.25 + 0.25 + 0.075)) < 1e-6
 
 
 def test_citizen_only_reports_cannot_reach_corroborated_threshold_without_instruments():
-    # Even a perfect trust/coherence/media report stays below auto-escalation
-    # unless instruments agree — the no-citizen-only-escalation rule holds
-    # numerically as well as by the explicit instrument>0 gate.
+    # Even a perfect trust/coherence/media/account-device report stays below
+    # auto-escalation unless instruments or satellite agree — the
+    # no-citizen-only-escalation rule holds numerically as well as by the
+    # explicit instrument>0-or-satellite>0 gate in scoring/service.py.
     best_citizen_only = engine.combine(
-        {"trust": 0.95, "coherence": 1.0, "instrument": 0.0, "media": 1.0}
+        {
+            "trust": 0.95,
+            "coherence": 1.0,
+            "instrument": 0.0,
+            "media": 1.0,
+            "satellite": 0.0,
+            "account_device": 1.0,
+        }
     )
-    assert best_citizen_only < 0.7  # and the service additionally requires instrument > 0
+    assert best_citizen_only < 0.7

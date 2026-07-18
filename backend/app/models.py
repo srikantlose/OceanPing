@@ -255,8 +255,22 @@ class ModelVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
+class SatelliteObservation(Base):
+    __tablename__ = "satellite_observations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=new_uuid)
+    incident_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("incidents.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(32))
+    recipe: Mapped[str] = mapped_column(String(64))
+    score: Mapped[float] = mapped_column(Float)
+    scene_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    scene_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
 Index("ix_reports_cell_time", Report.h3_cell, Report.created_at)
 Index("ix_readings_station_var_time", SensorReading.station_id, SensorReading.variable, SensorReading.time)
 Index("ix_subscriptions_channel_address", Subscription.channel, Subscription.address, unique=True)
 Index("ix_alerts_incident_status", Alert.incident_id, Alert.status)
 Index("ix_training_examples_outcome", TrainingExample.outcome)
+Index("ix_satellite_observations_incident_recipe", SatelliteObservation.incident_id, SatelliteObservation.recipe)

@@ -17,6 +17,8 @@ const COMPONENT_LABELS: Record<string, string> = {
   coherence: "Coherence",
   instrument: "Instruments",
   media: "Media",
+  satellite: "Satellite",
+  account_device: "Account/device",
 };
 
 function StatusChip({ status }: { status: string }) {
@@ -69,6 +71,14 @@ function ConfidenceBars({ report }: { report: any }) {
       {comp.detail?.hearsay && (
         <div style={{ fontSize: 12, color: "var(--warning)", marginTop: 6 }}>
           🗣 reads as a secondhand account (hearsay) — coherence contribution halved
+        </div>
+      )}
+      {comp.detail?.satellite_observations?.length > 0 && (
+        <div style={{ fontSize: 12, color: "var(--warning)", marginTop: 6 }}>
+          🛰 {comp.detail.satellite_observations.length} satellite observation(s):{" "}
+          {comp.detail.satellite_observations
+            .map((o: any) => `${o.provider}/${o.recipe} score=${o.score}`)
+            .join("; ")}
         </div>
       )}
       {comp.detail?.corroborating_anomalies?.length > 0 && (

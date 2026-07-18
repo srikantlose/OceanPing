@@ -9,9 +9,20 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.models import HAZARD_TYPES, Report, Reporter, Station, StationAnomaly, TrainingExample, Verification
+from app.core.redisclient import get_redis
+from app.models import (
+    HAZARD_TYPES,
+    Report,
+    Reporter,
+    SatelliteObservation,
+    Station,
+    StationAnomaly,
+    TrainingExample,
+    Verification,
+)
 from app.modules.alerts.service import sync_incident_alert
 from app.modules.nlp import classifier
+from app.modules.satellite.providers import HAZARD_RECIPES
 from app.modules.scoring import engine
 from app.modules.scoring.audit import append_audit
 
@@ -75,24 +86,72 @@ def _instrument_zscores(db: Session, report: Report) -> list[dict]:
     ]
 
 
+def _satellite_observations(db: Session, report: Report) -> list[dict]:
+    """Scene observations recorded for this report's incident under its
+    hazard's recipe (see satellite/providers.py). Empty for hazards with no
+    recipe, or before the (hours-latency) satellite poll job has run."""
+    if report.incident_id is None:
+        return []
+    recipe = HAZARD_RECIPES.get(report.hazard_type)
+    if not recipe:
+        return []
+    observations = db.scalars(
+        select(SatelliteObservation)
+        .where(SatelliteObservation.incident_id == report.incident_id)
+        .where(SatelliteObservation.recipe == recipe)
+    ).all()
+    return [
+        {
+            "provider": o.provider,
+            "recipe": o.recipe,
+            "score": round(o.score, 4),
+            "scene_time": o.scene_time.isoformat(),
+            "scene_url": o.scene_url,
+        }
+        for o in observations
+    ]
+
+
+def _account_device_score(report: Report) -> float:
+    """Reporter age + recent-report burst, reusing the same Redis counter
+    ingest/service.py's rate limiter already increments — no new I/O path."""
+    reporter = report.reporter
+    age_hours = max(0.0, (report.created_at - reporter.created_at).total_seconds() / 3600.0)
+    try:
+        raw = get_redis().get(f"rl:rep:{reporter.external_id_hash}")
+        recent_count = int(raw) if raw is not None else 1
+    except Exception:
+        recent_count = 1
+    return engine.account_device_score(age_hours, recent_count)
+
+
 def rescore_report(db: Session, report: Report) -> float:
     """Recompute confidence; escalate unverified→corroborated only with
-    instrument agreement (the no-citizen-only-escalation rule). Flushes, no commit."""
+    instrument or satellite agreement (the no-citizen-only-escalation rule —
+    report volume/trust/coherence alone still never gets there). Satellite
+    only has a recipe for a handful of slow hazards (oil_spill, algal_bloom,
+    coastal_flooding, storm_surge — see HAZARD_RECIPES), so fast hazards like
+    tsunami/rip_current still gate on instrument alone, same as before.
+    Flushes, no commit."""
     settings = get_settings()
     n_independent = _coherence_count(db, report)
     anomalies = _instrument_zscores(db, report)
     hearsay = classifier.detect_hearsay(report.text)
+    satellite_observations = _satellite_observations(db, report)
     prev = report.confidence_components or {}
     components = {
         "trust": round(report.reporter.trust_score, 4),
         "coherence": engine.coherence_score(n_independent, hearsay=hearsay),
         "instrument": engine.instrument_score([a["zscore"] for a in anomalies]),
         "media": prev.get("media", engine.MEDIA_NEUTRAL),
+        "satellite": engine.satellite_score([o["score"] for o in satellite_observations]),
+        "account_device": _account_device_score(report),
     }
     detail = {
         "n_independent_reports": n_independent,
         "corroborating_anomalies": anomalies,
         "hearsay": hearsay,
+        "satellite_observations": satellite_observations,
         # forensics are computed once at ingest; carry them across rescores
         "media_forensics": prev.get("media_forensics") or (prev.get("detail") or {}).get("media_forensics"),
     }
@@ -104,7 +163,7 @@ def rescore_report(db: Session, report: Report) -> float:
     if (
         report.status == "unverified"
         and new_confidence >= settings.corroborated_threshold
-        and components["instrument"] > 0
+        and (components["instrument"] > 0 or components["satellite"] > 0)
     ):
         report.status = "corroborated"
         append_audit(

@@ -84,6 +84,18 @@ class Settings(BaseSettings):
     exotel_from_number: str = ""
     exotel_subdomain: str = "api.exotel.com"
 
+    # Satellite corroboration (phase 2, milestone 2): "stub" is the only
+    # provider exercised without real credentials — deterministic, local-dev
+    # only. sentinel_hub/earth_engine are real adapter shells gated on the
+    # credentials below; the actual scene-scoring recipe is deferred (see the
+    # phase-2 plan) since there's no way to verify it without an account.
+    satellite_provider: str = "stub"
+    satellite_poll_minutes: int = 60
+    satellite_active_incident_hours: float = 24.0
+    sentinel_hub_client_id: str = ""
+    sentinel_hub_client_secret: str = ""
+    earth_engine_service_account_json: str = ""
+
     class Config:
         env_file = ".env"
         extra = "ignore"
