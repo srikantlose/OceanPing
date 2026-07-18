@@ -147,6 +147,14 @@ class Settings(BaseSettings):
     # no telco integration to look either of those up against.
     ivr_recording_max_seconds: int = 60
 
+    # Fisherman mode (phase 2, milestone 5): PFZ advisories are a deterministic
+    # local stub (see modules/fisherman/pfz.py for why — INCOIS's real PFZ
+    # product has no machine-readable feed, confirmed live). Real INCOIS PFZ
+    # bulletins are reissued roughly every 2-3 days; this refresh interval
+    # mirrors that cadence rather than the much-faster ERDDAP poll.
+    pfz_refresh_hours: float = 24.0
+    pfz_validity_hours: float = 60.0
+
     class Config:
         env_file = ".env"
         extra = "ignore"

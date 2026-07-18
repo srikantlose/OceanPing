@@ -11,6 +11,7 @@ from app.modules.chat.router import router as chat_router
 from app.modules.delivery.router import router as delivery_router
 from app.modules.analyst.router import router as analyst_router
 from app.modules.drill.router import router as drill_router
+from app.modules.fisherman.router import router as fisherman_router
 from app.modules.geo.router import router as geo_router
 from app.modules.ingest.router import router as ingest_router
 from app.modules.ivr.router import router as ivr_router
@@ -67,6 +68,7 @@ app.include_router(drill_router)
 app.include_router(chat_router)
 app.include_router(whatsapp_router)
 app.include_router(ivr_router)
+app.include_router(fisherman_router)
 
 
 @app.get("/healthz")

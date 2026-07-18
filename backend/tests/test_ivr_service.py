@@ -23,14 +23,49 @@ def _settings(**overrides):
     return SimpleNamespace(**base)
 
 
-# --- handle_start --------------------------------------------------------------
+# --- handle_start / handle_language ---------------------------------------------
 
-def test_handle_start_gathers_a_digit_for_every_hazard():
+def test_handle_start_gathers_a_language_choice():
     twiml = service.handle_start()
+    assert "<Gather" in twiml
+    assert 'action="/webhooks/ivr/voice?step=language"' in twiml
+    assert "press 1" in twiml.lower()
+
+
+def test_handle_language_english_prompts_hazard_menu_in_english(monkeypatch):
+    fake = FakeRedis()
+    monkeypatch.setattr(service, "get_redis", lambda: fake)
+    twiml = service.handle_language("CA123", "1")
     assert "<Gather" in twiml
     assert 'action="/webhooks/ivr/voice?step=hazard"' in twiml
     for i in range(1, 10):
         assert f"Press {i} for" in twiml
+    assert service._load("CA123") == {"lang": "en"}
+
+
+def test_handle_language_tamil_prompts_hazard_menu_in_tamil(monkeypatch):
+    fake = FakeRedis()
+    monkeypatch.setattr(service, "get_redis", lambda: fake)
+    twiml = service.handle_language("CA123", "2")
+    assert service._load("CA123") == {"lang": "ta"}
+    assert "எண்ணெய் கசிவு" in twiml  # oil_spill, Tamil
+
+
+def test_handle_language_telugu_prompts_hazard_menu_in_telugu(monkeypatch):
+    fake = FakeRedis()
+    monkeypatch.setattr(service, "get_redis", lambda: fake)
+    twiml = service.handle_language("CA123", "3")
+    assert service._load("CA123") == {"lang": "te"}
+    assert "చమురు లీకేజీ" in twiml  # oil_spill, Telugu
+
+
+def test_handle_language_invalid_digit_returns_error(monkeypatch):
+    fake = FakeRedis()
+    monkeypatch.setattr(service, "get_redis", lambda: fake)
+    twiml = service.handle_language("CA123", "9")
+    assert "Invalid selection" in twiml
+    assert "<Gather" not in twiml
+    assert service._load("CA123") == {}
 
 
 # --- handle_hazard ---------------------------------------------------------------
@@ -60,6 +95,18 @@ def test_handle_hazard_non_numeric_digit_returns_error(monkeypatch):
     assert "Invalid selection" in twiml
 
 
+def test_handle_hazard_preserves_previously_selected_language(monkeypatch):
+    """Regression test: handle_hazard used to _save() a brand-new dict,
+    silently discarding whatever handle_language had just stored (the
+    session-overwrite counterpart to the digit-"0" negative-indexing bug)."""
+    fake = FakeRedis()
+    monkeypatch.setattr(service, "get_redis", lambda: fake)
+    service._save("CA123", {"lang": "ta"})
+    twiml = service.handle_hazard("CA123", "6")  # oil_spill
+    assert service.IVR_STRINGS["ta"]["which_area"] in twiml
+    assert service._load("CA123") == {"lang": "ta", "hazard_type": "oil_spill"}
+
+
 # --- handle_location -------------------------------------------------------------
 
 def test_handle_location_valid_digit_updates_session_and_prompts_recording(monkeypatch):
@@ -81,6 +128,17 @@ def test_handle_location_invalid_digit_returns_error(monkeypatch):
     twiml = service.handle_location("CA123", "9")
     assert "Invalid selection" in twiml
     assert "<Record" not in twiml
+
+
+def test_handle_location_preserves_language_in_session(monkeypatch):
+    fake = FakeRedis()
+    monkeypatch.setattr(service, "get_redis", lambda: fake)
+    monkeypatch.setattr(service, "get_settings", lambda: _settings())
+    service._save("CA123", {"lang": "te", "hazard_type": "oil_spill"})
+    twiml = service.handle_location("CA123", "1")
+    assert service.IVR_STRINGS["te"]["after_beep"] in twiml
+    session = service._load("CA123")
+    assert session["lang"] == "te" and session["hazard_type"] == "oil_spill"
 
 
 # --- handle_recording ------------------------------------------------------------
@@ -119,6 +177,16 @@ def test_handle_recording_without_recording_url_submits_with_no_text(monkeypatch
     twiml = service.handle_recording(object(), "CA123", "+91999", None)
     assert "Thank you" in twiml
     assert captured["text"] is None
+
+
+def test_handle_recording_uses_session_language_for_closing_message(monkeypatch):
+    fake = FakeRedis()
+    monkeypatch.setattr(service, "get_redis", lambda: fake)
+    monkeypatch.setattr(service, "get_settings", lambda: _settings())
+    service._save("CA123", {"lang": "ta", "hazard_type": "erosion", "lat": 1.0, "lon": 2.0})
+    monkeypatch.setattr(service, "create_report", lambda db, **kw: SimpleNamespace(id="r1"))
+    twiml = service.handle_recording(object(), "CA123", "+91999", None)
+    assert service.IVR_STRINGS["ta"]["thank_you"] in twiml
 
 
 def test_handle_recording_missing_session_returns_graceful_error(monkeypatch):

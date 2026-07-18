@@ -1,7 +1,8 @@
 # Phase 2 — Fusion & Reach (blueprint weeks 15–24, gap plan)
 
 **Status: 🟡 in progress (July 2026).** Milestones 2 (satellite + six-signal rebalance),
-3 (RAG chatbot), and 4 (channel-agnostic conversation core + WhatsApp + IVR) built.
+3 (RAG chatbot), 4 (channel-agnostic conversation core + WhatsApp + IVR), and 5
+(fisherman mode: roles, PFZ/sea-state surfaces, Tamil/Telugu localization) built.
 Milestone 1 (INCOIS real datasets) investigated and found blocked on external data
 availability — see below — deferred rather than faked. Prereqs: phase 0 (built); phase 1
 delivery worker for new channels.
@@ -299,6 +300,151 @@ Tamil/Telugu localization); a WhatsApp "subscribe" or `/ask`-equivalent chat ent
 (milestone 4's scope is the report-submission flow; WhatsApp subscribe/chat parity with
 Telegram wasn't in the gap-work breakdown's action items for this milestone).
 
+## Milestone 5 — as built
+
+Fisherman mode (elevated-trust roles + give-before-ask PFZ/sea-state surfaces) and
+Tamil/Telugu localization are live:
+
+- **Fisherman role + elevated trust**: `ingest/service.py::get_or_create_reporter` gained
+  a `role` parameter; a newly-created reporter registered with `role="fisherman"` starts
+  at `FISHERMAN_START_TRUST` (0.65) instead of the citizen default (0.5) — cooperative
+  membership is itself a real identity check this app otherwise can't perform, per the
+  plan's own reasoning. `create_report()`'s call site is unchanged (still defaults to
+  `"citizen"`), so existing report-submission behavior across every channel is untouched.
+- **Cooperative registration** — new module `backend/app/modules/fisherman/`:
+  - `roster.py` — a small, hand-seeded list of cooperative-member phone numbers standing
+    in for a real fisheries-cooperative membership import (the same honest-stub role
+    `ivr/locations.py`'s pilot-location list and `satellite/providers.py`'s StubProvider
+    play elsewhere in this project). Matched by phone number (normalized to the last 10
+    digits, so country-code/leading-zero formatting differences don't matter), not by
+    Telegram ID, since a phone number is what a cooperative roster would actually contain.
+  - `service.py::register_fisherman()` — looks a phone number up against the roster,
+    calls `get_or_create_reporter(..., role="fisherman")`, and only bumps `trust_score` to
+    `FISHERMAN_START_TRUST` if the reporter has no verification history yet
+    (`verified_count == debunked_count == 0`) — a reporter who already earned or lost
+    trust through real verifications keeps that earned score rather than having
+    fisherman-mode registration silently override it.
+  - `backend/app/modules/ingest/bot_runner.py` gained `/fisherman`: requests the caller's
+    phone number via Telegram's native "share contact" button (same `request_*` keyboard
+    pattern `/subscribe` already uses for location), then verifies it against the roster.
+    Telegram-only for this milestone — WhatsApp/IVR fisherman registration wasn't in
+    scope here (see "Not built" below).
+- **PFZ + sea-state ("give before ask") surfaces**:
+  - `backend/app/models.py` — `PfzAdvisory` (sector, lat/lon, depth, distance/bearing from
+    a named landing site, validity window, source). Migration `0008_fisherman.py` (follows
+    the `0006`/`0007` `create_all` pattern).
+  - `backend/app/modules/fisherman/pfz.py` — **investigated the real INCOIS PFZ product
+    live before writing any code**, same as milestone 1's ERDDAP check:
+    `https://incois.gov.in/MarineFisheries/PfzAdvisory` is a session-driven JS form
+    (sector + language dropdowns), and the advisory content it actually renders is a
+    static image (`MFS_English.jpg`), not structured text — confirmed via a live fetch.
+    INCOIS's own documentation lists telephone/fax/e-mail/radio/doordarshan as the real
+    dissemination channels for this product, not a machine-readable feed. Same conclusion
+    milestone 1 reached about tide-gauge data: nothing here to scrape reliably.
+    `StubPfzProvider` is a deterministic local stand-in (seeded by sector + ISO week, so
+    a batch is stable for a few days then rotates, mirroring real PFZ bulletins' ~2-3 day
+    reissue cadence) — ships as the *only* provider, with no credential-gated "real
+    provider" shell, since (unlike Sentinel Hub/Earth Engine) there's no known real
+    integration point to gate one against.
+  - `service.py::refresh_pfz_advisories()` / `active_pfz_advisories()` — replace and
+    read back a sector's advisory batch. `nearest_station_reading()` finds the closest
+    configured instrument station (plain haversine distance — station counts are small,
+    no PostGIS needed) and honestly flags `is_local` (within `instrument_radius_km`,
+    the same radius scoring uses) rather than presenting a half-a-world-away demo buoy as
+    if it were local sea state — this pilot deployment's only *enabled* station is the
+    NDBC demo buoy in San Francisco, so `is_local` will correctly read `false` there until
+    a real coastal station is added (same gap milestone 1 already documents).
+  - `router.py` — public `GET /sea/pfz` and `GET /sea/state` (same trust boundary as
+    `/map/*` and `/chat` — no analyst auth).
+  - `core/scheduler.py` gained a `pfz_refresh` interval job (`pfz_refresh_hours`, default
+    24h) plus a one-shot initial refresh at startup, mirroring `satellite_poll`'s pattern.
+    `drill/router.py::/drill/tick` also force-refreshes PFZ, same as satellite polling, so
+    drills see fresh zones immediately.
+  - `bot_runner.py` gained `/sea` (nearest station + readings + active anomalies) and
+    `/pfz` (active zones for the pilot sector) — no location prompt needed for either,
+    since this is a single-pilot-region deployment (Chennai) and PFZ is sector-wide, not
+    point-specific.
+  - `frontend/components/SeaState.tsx` + `frontend/app/sea/page.tsx` — a simple two-card
+    page (sea state, PFZ zones) using the browser's geolocation if granted, falling back
+    to the pilot centroid otherwise; added to the nav bar. No new CSS — reuses the
+    existing `.card`/`.notice`/`.conf-total` utility classes.
+- **Tamil/Telugu localization** (`ingest/report_conversation.py`): `HAZARD_LABELS_BY_LANG`
+  / `HAZARD_SPEECH_LABELS_BY_LANG` / `PROMPTS_BY_LANG` cover `en`/`ta`/`te`; `ReportSession`
+  gained a `lang` field threaded through `start()`/`on_location()`/`on_hazard()`/
+  `on_description()` so the whole flow replies in one language once chosen.
+  `normalize_lang()` reduces a client tag (e.g. Telegram's `"ta-IN"`) to a supported code,
+  defaulting to English. The Tamil/Telugu strings are flagged in-code as a **first pass,
+  not reviewed by a native speaker** — standard, widely-recognized disaster-terminology
+  vocabulary, but worth a review pass before relying on them beyond this pilot, especially
+  the hazard names themselves.
+  - **Telegram**: `cmd_report` now reads `update.effective_user.language_code` (Telegram
+    already exposes the client's language) and passes it to `conv.start()` — no menu
+    needed. `bot_runner.py` also gained a small `_SKIP_HINT` map so the Telegram-only
+    "(or /skip)" command hint gets attached to the correctly-translated parenthetical
+    instead of silently no-op'ing against an English literal.
+  - **IVR** (`modules/ivr/service.py`) — the language-selection step the phase-2 plan's
+    own wording implied ("language → hazard digit → location") and milestone 4 explicitly
+    deferred is now built: `handle_start()` gathers a language digit first (the menu
+    itself is necessarily announced in all three languages at once, since the caller
+    hasn't picked one yet — the same thing real multi-language IVR systems do), then
+    every subsequent prompt (hazard menu, location menu, recording instructions, closing
+    messages) reads the chosen language from the Redis call session via the new
+    `IVR_STRINGS` table.
+  - **WhatsApp — not localized this milestone** (see "Not built" below).
+- **A real bug this work caught in passing**: while threading `lang` through the IVR call
+  session, `handle_hazard()`'s `_save(call_sid, {"hazard_type": hazard_type})` was
+  discovered to overwrite the *entire* session dict rather than merging into it — meaning
+  it would have silently discarded the just-selected `lang` (a session-overwrite
+  counterpart to milestone 4's digit-"0" negative-indexing bug, in the same function).
+  Fixed to load-then-merge, matching `handle_location()`'s already-correct pattern; caught
+  by a new regression test (`test_handle_hazard_preserves_previously_selected_language`)
+  before it ever shipped, and reconfirmed live via a full Tamil call sequence below.
+- Tests: `test_fisherman_pfz.py` (roster phone-format matching, StubPfzProvider
+  determinism/sector-variation), `test_fisherman_service.py` (registration trust-elevation
+  and earned-trust-preservation, PFZ refresh/read-back, haversine nearest-station and
+  `is_local` thresholding), `test_report_conversation.py` additions (lang normalization,
+  localized hazard menu/prompts, a full Tamil happy-path walkthrough, backward-compatible
+  `from_json` for pre-milestone-5 sessions with no `lang` key), `test_ivr_service.py`
+  additions (the language-select step in all three languages, the invalid-digit case, and
+  the session-overwrite regression test), `test_bot_runner.py` additions (Telegram
+  client-language detection, `/fisherman` registration verified/rejected paths, `/sea` and
+  `/pfz`).
+
+**Verified live, not just under mocks:** rebuilt and restarted `backend`, `worker`,
+`bot`, and `frontend`. Ran `scripts/drill.py` clean end-to-end, including two new
+assertions: `/sea/pfz` returned real StubPfzProvider zones right after `/drill/tick`'s
+forced refresh, and `/sea/state` correctly picked the drill's own Chennai tide gauge as
+the nearest station (2.2 km away, `is_local=true`) over the NDBC demo buoy on the other
+side of the world. Posted a full Twilio-style IVR call sequence by hand
+(start → language digit 2 → hazard digit 6 → location digit 1 → recording with no
+`RecordingUrl`) and confirmed via `psql` a real `reports` row (`source=ivr`,
+`hazard_type=oil_spill`, Marina Beach's coordinates) — with every prompt in the sequence,
+including the final "thank you" message, correctly rendered in Tamil. Also reconfirmed
+live that an invalid language digit and an invalid hazard digit ("0", the milestone-4
+regression) both still correctly return "Invalid selection" rather than silently
+misrouting. Fetched the live frontend's `/sea` page directly (`curl localhost:3000/sea`
+→ HTTP 200) and confirmed both card headings render, not just that the route compiled
+into the build. Ran the `bot` container: it still starts cleanly and degrades exactly as
+before (no `TELEGRAM_BOT_TOKEN` in this environment), so `/fisherman`/`/sea`/`/pfz` and
+the Telegram-side localization are covered end-to-end by `test_bot_runner.py`'s
+fake-Update walkthrough rather than real Telegram polling — same limitation every prior
+milestone touching the bot has hit. Checked backend logs across the whole session: no
+exceptions.
+
+**Not built:**
+- **WhatsApp language selection/localization** — WhatsApp doesn't expose a client-language
+  signal the way Telegram's `language_code` does, so adding an explicit language-select
+  step (like IVR's new one) was out of scope here; the WhatsApp flow stays English-only.
+- **Fisherman registration for WhatsApp/IVR** — `/fisherman`-equivalent verification was
+  only built for Telegram this milestone (its native contact-share button made this a
+  natural fit); registering via WhatsApp or a phone call is a real gap, not a phantom one.
+- **Per-cooperative granularity** — `Reporter` only records `role="fisherman"`, not which
+  cooperative verified them; the plan's "give-before-ask" and elevated-trust goals didn't
+  need that level of detail, and `Reporter` gaining a cooperative-name column wasn't worth
+  a migration for a fact nothing yet reads.
+- A native-speaker review pass on the Tamil/Telugu strings (see the localization section
+  above) — flagged in-code, not silently shipped as verified-correct.
+
 ## Goals
 
 Add the third and fourth verification streams (satellite, richer instruments), meet people
@@ -417,7 +563,11 @@ drills, or (c) the phase-3 service split begins. Record the decision here when t
    `reports` rows created); outbound WhatsApp sends and Twilio recording download
    unverified live, no real Meta/Twilio account in this environment; IVR language
    selection deferred to milestone 5
-5. Fisherman mode (roles, PFZ surfaces)
+5. ✅ Fisherman mode (roles, PFZ/sea-state surfaces) + Tamil/Telugu localization,
+   including IVR's language-selection step deferred from milestone 4 — verified live
+   end-to-end (drill's PFZ/sea-state checks, a full Tamil IVR call sequence producing a
+   real report); WhatsApp localization and fisherman registration on WhatsApp/IVR remain
+   out of scope (see milestone 5's "as built" section)
 6. Valhalla routing + shelters + public map routing UI
 
 ## Verification
@@ -440,5 +590,11 @@ drills, or (c) the phase-3 service split begins. Record the decision here when t
 - ✅ WhatsApp: full webhook conversation (trigger → location → hazard → description →
   skip) verified live to create a real report with `source="whatsapp"`; verify-token
   rejection and the no-session help-text fallback also verified live.
+- ✅ Fisherman mode: a full Tamil-language IVR call sequence (language digit → hazard
+  digit → location digit → recording) verified live to produce a real report, with every
+  spoken prompt correctly localized; `/sea/pfz` and `/sea/state` verified live via the
+  drill's forced refresh and via the live frontend `/sea` page (`curl` → HTTP 200); the
+  `is_local` sea-state flag verified to correctly distinguish the drill's own nearby
+  tide gauge from the far-away NDBC demo buoy.
 - Routing: request from a point inside a drill flood zone → route avoids closed cells
   (assert no polyline vertex inside excluded polygons).

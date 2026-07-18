@@ -26,6 +26,13 @@ class RateLimited(Exception):
     pass
 
 
+# Fisherman mode (phase 2, milestone 5): a role registered via cooperative
+# membership (see modules/fisherman/roster.py) starts with more trust than an
+# anonymous citizen account, since cooperative membership is itself a real
+# identity check this app can't otherwise perform.
+FISHERMAN_START_TRUST = 0.65
+
+
 def _hash_identity(source: str, external_id: str) -> str:
     return hashlib.sha256(f"{source}:{external_id}".encode()).hexdigest()
 
@@ -49,11 +56,13 @@ def _check_rate_limits(reporter_hash: str, cell: str) -> None:
         log.warning("Redis unavailable; rate limiting skipped", exc_info=True)
 
 
-def get_or_create_reporter(db: Session, source: str, external_id: str) -> Reporter:
+def get_or_create_reporter(db: Session, source: str, external_id: str, role: str = "citizen") -> Reporter:
     identity = _hash_identity(source, external_id)
     reporter = db.scalar(select(Reporter).where(Reporter.external_id_hash == identity))
     if reporter is None:
-        reporter = Reporter(source=source, external_id_hash=identity)
+        reporter = Reporter(source=source, external_id_hash=identity, role=role)
+        if role == "fisherman":
+            reporter.trust_score = FISHERMAN_START_TRUST
         db.add(reporter)
         db.flush()
     return reporter

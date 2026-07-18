@@ -136,10 +136,11 @@ def main() -> None:
         print(f"   [{rep['status']:>11}] conf={rep['confidence']:.2f} "
               f"{rep['hazard_type']:<17} lang={rep['lang']:<5} \"{text[:48]}…\"")
 
-    print("→ Forcing pipeline tick (anomaly detection + satellite poll + rescore)…")
+    print("→ Forcing pipeline tick (anomaly detection + satellite poll + PFZ refresh + rescore)…")
     tick = call(args.api, "/drill/tick", method="POST", token=token)
     print(f"   rescored {tick['rescored_reports']} reports, "
-          f"{tick['satellite_observations']} satellite observation(s) recorded")
+          f"{tick['satellite_observations']} satellite observation(s) recorded, "
+          f"{tick['pfz_zones']} PFZ zone(s) (re)issued")
 
     print("→ Post-tick state:")
     reports = call(args.api, "/analyst/reports?limit=20", token=token)
@@ -168,6 +169,17 @@ def main() -> None:
 
     hotspots = call(args.api, "/map/hotspots")
     print(f"   hotspots on map: {len(hotspots['features'])}")
+
+    print("→ Checking fisherman-mode PFZ advisories and nearby sea-state (StubPfzProvider)…")
+    pfz = call(args.api, "/sea/pfz")
+    assert pfz["zones"], "expected PFZ zones after /drill/tick's refresh — StubPfzProvider not wired?"
+    print(f"   {len(pfz['zones'])} PFZ zone(s) for sector '{pfz['sector']}', "
+          f"e.g. {pfz['zones'][0]['bearing']} (depth {pfz['zones'][0]['depth_m']} m)")
+    sea_state = call(args.api, f"/sea/state?lat={MARINA[0]}&lon={MARINA[1]}")
+    station = sea_state["station"]
+    assert station, "expected a nearby station — did the drill tide gauge get inserted?"
+    local = "local" if station["is_local"] else "NOT local"
+    print(f"   nearest station: {station['station_name']} ({station['distance_km']} km away, {local})")
 
     print("→ Alerts auto-proposed from incident corroboration:")
     alerts = call(args.api, "/analyst/alerts", token=token)

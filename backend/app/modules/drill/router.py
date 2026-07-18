@@ -10,6 +10,7 @@ from app.core.db import get_db
 from app.core.redisclient import get_redis
 from app.core.security import require_analyst
 from app.models import Station
+from app.modules.fisherman.service import refresh_pfz_advisories
 from app.modules.geo.hotspots import CACHE_KEY as HOTSPOT_CACHE_KEY
 from app.modules.satellite.service import poll_satellite
 from app.modules.scoring.service import rescore_recent
@@ -62,8 +63,13 @@ def tick(_: str = Depends(require_analyst), db: Session = Depends(get_db)) -> di
     detect_anomalies(db)
     satellite_observed = poll_satellite(db)
     rescored = rescore_recent(db)
+    pfz_zones = refresh_pfz_advisories(db)
     try:  # drop the cached hotspot layer so the drill sees fresh clusters
         get_redis().delete(HOTSPOT_CACHE_KEY)
     except Exception:
         pass
-    return {"rescored_reports": rescored, "satellite_observations": satellite_observed}
+    return {
+        "rescored_reports": rescored,
+        "satellite_observations": satellite_observed,
+        "pfz_zones": pfz_zones,
+    }

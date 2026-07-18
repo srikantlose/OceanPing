@@ -67,22 +67,123 @@ HAZARD_SPEECH_LABELS = {
 
 assert set(HAZARD_LABELS) == set(HAZARD_TYPES) == set(HAZARD_SPEECH_LABELS)
 
+# --- Localization (phase 2, milestone 5) ------------------------------------
+#
+# Tamil/Telugu strings below are a first pass for the pilot deployment — not
+# reviewed by a native speaker. They use standard, widely-recognized
+# disaster-terminology vocabulary, but a review pass is recommended before
+# relying on them beyond the pilot, especially for the hazard names
+# themselves (getting "tsunami" or "storm surge" wrong is exactly the kind of
+# mistake that matters here). English is always the safe fallback for an
+# unrecognized or unconfigured language.
+SUPPORTED_LANGS = ("en", "ta", "te")
 
-def hazard_menu_items() -> list[tuple[str, str]]:
+HAZARD_LABELS_BY_LANG = {
+    "en": HAZARD_LABELS,
+    "ta": {
+        "coastal_flooding": "🌊 கடலோர வெள்ளம்",
+        "storm_surge": "🌀 புயல் அலைப்பெருக்கு",
+        "high_waves": "🌊 அதிக அலைகள்",
+        "tsunami": "⚠️ சுனாமி அறிகுறிகள்",
+        "rip_current": "🏊 இழுவை நீரோட்டம்",
+        "oil_spill": "🛢️ எண்ணெய் கசிவு",
+        "algal_bloom": "🟢 பாசி பெருக்கம் / மீன் இறப்பு",
+        "erosion": "🏖️ கடற்கரை அரிப்பு",
+        "other": "❓ மற்றவை",
+    },
+    "te": {
+        "coastal_flooding": "🌊 తీర వరదలు",
+        "storm_surge": "🌀 తుఫాను ఉప్పెన",
+        "high_waves": "🌊 ఎత్తైన అలలు",
+        "tsunami": "⚠️ సునామీ సూచనలు",
+        "rip_current": "🏊 లాగే ప్రవాహం",
+        "oil_spill": "🛢️ చమురు లీకేజీ",
+        "algal_bloom": "🟢 ఆల్గే వ్యాప్తి / చేపల మరణం",
+        "erosion": "🏖️ తీర కోత",
+        "other": "❓ ఇతర",
+    },
+}
+HAZARD_SPEECH_LABELS_BY_LANG = {
+    "en": HAZARD_SPEECH_LABELS,
+    "ta": {
+        "coastal_flooding": "கடலோர வெள்ளம்",
+        "storm_surge": "புயல் அலைப்பெருக்கு",
+        "high_waves": "அதிக அலைகள்",
+        "tsunami": "சுனாமி அறிகுறிகள்",
+        "rip_current": "இழுவை நீரோட்டம்",
+        "oil_spill": "எண்ணெய் கசிவு",
+        "algal_bloom": "பாசி பெருக்கம் அல்லது மீன் இறப்பு",
+        "erosion": "கடற்கரை அரிப்பு",
+        "other": "வேறு ஆபத்து",
+    },
+    "te": {
+        "coastal_flooding": "తీర వరదలు",
+        "storm_surge": "తుఫాను ఉప్పెన",
+        "high_waves": "ఎత్తైన అలలు",
+        "tsunami": "సునామీ సూచనలు",
+        "rip_current": "లాగే ప్రవాహం",
+        "oil_spill": "చమురు లీకేజీ",
+        "algal_bloom": "ఆల్గే వ్యాప్తి లేదా చేపల మరణం",
+        "erosion": "తీర కోత",
+        "other": "వేరే ప్రమాదం",
+    },
+}
+assert set(HAZARD_LABELS_BY_LANG) == set(HAZARD_SPEECH_LABELS_BY_LANG) == set(SUPPORTED_LANGS)
+for _lang in SUPPORTED_LANGS:
+    assert set(HAZARD_LABELS_BY_LANG[_lang]) == set(HAZARD_TYPES)
+    assert set(HAZARD_SPEECH_LABELS_BY_LANG[_lang]) == set(HAZARD_TYPES)
+
+
+def normalize_lang(lang: str | None) -> str:
+    """Reduce a client-supplied language tag (e.g. Telegram's "ta-IN") to one
+    of `SUPPORTED_LANGS`, defaulting to English for anything unrecognized."""
+    code = (lang or "en").split("-")[0].lower()
+    return code if code in SUPPORTED_LANGS else "en"
+
+
+def hazard_menu_items(lang: str = "en") -> list[tuple[str, str]]:
     """`[(hazard_type, label), ...]` in canonical order — the source every
     channel's hazard picker (buttons, list rows, DTMF digits) builds from."""
-    return [(hz, HAZARD_LABELS[hz]) for hz in HAZARD_TYPES]
+    labels = HAZARD_LABELS_BY_LANG[normalize_lang(lang)]
+    return [(hz, labels[hz]) for hz in HAZARD_TYPES]
 
 
-PROMPT_LOCATION = "Where is the hazard? Share your location."
-PROMPT_HAZARD = "What do you see?"
-PROMPT_DESCRIPTION = "Describe what you see, in any language (or skip):"
-PROMPT_PHOTO = "Send a photo of the hazard (or skip):"
+PROMPTS_BY_LANG = {
+    "en": {
+        "location": "Where is the hazard? Share your location.",
+        "hazard": "What do you see?",
+        "description": "Describe what you see, in any language (or skip):",
+        "photo": "Send a photo of the hazard (or skip):",
+        "selected": "Selected",
+    },
+    "ta": {
+        "location": "ஆபத்து எங்கே உள்ளது? உங்கள் இருப்பிடத்தை பகிரவும்.",
+        "hazard": "நீங்கள் என்ன பார்க்கிறீர்கள்?",
+        "description": "நீங்கள் பார்ப்பதை எந்த மொழியிலும் விவரிக்கவும் (அல்லது தவிர்க்கவும்):",
+        "photo": "ஆபத்தின் புகைப்படத்தை அனுப்பவும் (அல்லது தவிர்க்கவும்):",
+        "selected": "தேர்ந்தெடுக்கப்பட்டது",
+    },
+    "te": {
+        "location": "ప్రమాదం ఎక్కడ ఉంది? మీ లొకేషన్‌ను షేర్ చేయండి.",
+        "hazard": "మీరు ఏమి చూస్తున్నారు?",
+        "description": "మీరు చూసేది ఏ భాషలోనైనా వివరించండి (లేదా దాటవేయండి):",
+        "photo": "ప్రమాదం యొక్క ఫోటోను పంపండి (లేదా దాటవేయండి):",
+        "selected": "ఎంచుకున్నారు",
+    },
+}
+assert set(PROMPTS_BY_LANG) == set(SUPPORTED_LANGS)
+
+# Backward-compatible English-only names some existing call sites still use.
+PROMPT_LOCATION = PROMPTS_BY_LANG["en"]["location"]
+PROMPT_HAZARD = PROMPTS_BY_LANG["en"]["hazard"]
+PROMPT_DESCRIPTION = PROMPTS_BY_LANG["en"]["description"]
+PROMPT_PHOTO = PROMPTS_BY_LANG["en"]["photo"]
 
 
 @dataclass
 class ReportSession:
     state: ConvState = ConvState.LOCATION
+    lang: str = "en"
     lat: float | None = None
     lon: float | None = None
     hazard_type: str | None = None
@@ -106,8 +207,9 @@ class ConversationError(Exception):
     adapters should catch this and re-prompt rather than let it propagate."""
 
 
-def start() -> tuple[ReportSession, str]:
-    return ReportSession(), PROMPT_LOCATION
+def start(lang: str = "en") -> tuple[ReportSession, str]:
+    lang = normalize_lang(lang)
+    return ReportSession(lang=lang), PROMPTS_BY_LANG[lang]["location"]
 
 
 def on_location(session: ReportSession, lat: float, lon: float) -> tuple[ReportSession, str]:
@@ -115,7 +217,7 @@ def on_location(session: ReportSession, lat: float, lon: float) -> tuple[ReportS
         raise ConversationError(f"expected LOCATION, session is in {session.state}")
     session.lat, session.lon = lat, lon
     session.state = ConvState.HAZARD
-    return session, PROMPT_HAZARD
+    return session, PROMPTS_BY_LANG[session.lang]["hazard"]
 
 
 def on_hazard(session: ReportSession, hazard_type: str) -> tuple[ReportSession, str]:
@@ -125,7 +227,9 @@ def on_hazard(session: ReportSession, hazard_type: str) -> tuple[ReportSession, 
         raise ConversationError(f"unknown hazard_type {hazard_type!r}")
     session.hazard_type = hazard_type
     session.state = ConvState.DESCRIPTION
-    return session, f"Selected: {HAZARD_LABELS[hazard_type]}\n\n{PROMPT_DESCRIPTION}"
+    prompts = PROMPTS_BY_LANG[session.lang]
+    label = HAZARD_LABELS_BY_LANG[session.lang][hazard_type]
+    return session, f"{prompts['selected']}: {label}\n\n{prompts['description']}"
 
 
 def on_description(session: ReportSession, text: str | None) -> tuple[ReportSession, str]:
@@ -133,7 +237,7 @@ def on_description(session: ReportSession, text: str | None) -> tuple[ReportSess
         raise ConversationError(f"expected DESCRIPTION, session is in {session.state}")
     session.text = text
     session.state = ConvState.PHOTO
-    return session, PROMPT_PHOTO
+    return session, PROMPTS_BY_LANG[session.lang]["photo"]
 
 
 def skip_description(session: ReportSession) -> tuple[ReportSession, str]:

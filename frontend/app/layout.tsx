@@ -20,6 +20,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <nav>
             <Link href="/">Live map</Link>
             <Link href="/report">Report a hazard</Link>
+            <Link href="/sea">Sea &amp; fishing zones</Link>
             <Link href="/analyst">Analyst</Link>
           </nav>
         </header>

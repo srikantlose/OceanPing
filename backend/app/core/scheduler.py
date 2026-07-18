@@ -24,6 +24,7 @@ def _job(fn):
 
 
 def build_scheduler() -> BackgroundScheduler:
+    from app.modules.fisherman.service import refresh_pfz_advisories
     from app.modules.satellite.service import poll_satellite
     from app.modules.scoring.service import rescore_recent
     from app.modules.sensors.service import detect_anomalies, poll_all
@@ -38,6 +39,9 @@ def build_scheduler() -> BackgroundScheduler:
                       id="rescore_recent")
     scheduler.add_job(_job(poll_satellite), "interval", minutes=settings.satellite_poll_minutes,
                       id="satellite_poll")
-    # One-shot initial poll so the map has sensor data right after startup.
+    scheduler.add_job(_job(refresh_pfz_advisories), "interval", hours=settings.pfz_refresh_hours,
+                      id="pfz_refresh")
+    # One-shot initial jobs so the map/sea page have data right after startup.
     scheduler.add_job(_job(poll_all), id="erddap_poll_initial")
+    scheduler.add_job(_job(refresh_pfz_advisories), id="pfz_refresh_initial")
     return scheduler

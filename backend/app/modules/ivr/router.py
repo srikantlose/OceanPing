@@ -20,7 +20,9 @@ async def voice_webhook(request: Request, db: Session = Depends(get_db)) -> Resp
     call_sid = form.get("CallSid", "")
     from_number = form.get("From", "")
 
-    if step == "hazard":
+    if step == "language":
+        twiml = service.handle_language(call_sid, form.get("Digits", ""))
+    elif step == "hazard":
         twiml = service.handle_hazard(call_sid, form.get("Digits", ""))
     elif step == "location":
         twiml = service.handle_location(call_sid, form.get("Digits", ""))

@@ -37,6 +37,8 @@ from app.core.db import SessionLocal
 from app.models import Subscription
 from app.modules.alerts.geofence import cells_around
 from app.modules.chat import service as chat_service
+from app.modules.fisherman import pfz as pfz_mod
+from app.modules.fisherman import service as fisherman_service
 from app.modules.ingest import report_conversation as conv
 from app.modules.ingest import voice
 from app.modules.ingest.service import RateLimited, create_report
@@ -45,6 +47,23 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 SUBSCRIBE_LOCATION = 100  # separate state space; independent ConversationHandler
+FISHERMAN_PHONE = 101  # separate state space; independent ConversationHandler
+
+# Telegram-only UX sugar: the shared prompts end in a translated "(or skip):"
+# parenthetical; here it's turned into a clickable "/skip" hint, per language,
+# since typing the localized word for "skip" wouldn't itself trigger anything
+# — only the /skip command (registered below) or WhatsApp's literal "skip"
+# check does that.
+_SKIP_HINT = {
+    "en": ("(or skip):", "(or /skip):"),
+    "ta": ("(அல்லது தவிர்க்கவும்):", "(அல்லது /skip):"),
+    "te": ("(లేదా దాటవేయండి):", "(లేదా /skip):"),
+}
+
+
+def _with_skip_hint(prompt: str, lang: str) -> str:
+    old, new = _SKIP_HINT.get(lang, _SKIP_HINT["en"])
+    return prompt.replace(old, new)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -56,9 +75,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Use /subscribe to get alerts for hazards near a place you care about.\n\n"
         "Use /ask followed by a question to ask about hazards, alert tiers, or "
         "coastal safety in general.\n\n"
+        "Fisherman? Use /fisherman to verify your cooperative membership for "
+        "elevated trust, then /sea and /pfz any time for local sea-state and "
+        "potential-fishing-zone info.\n\n"
         "Commands:\n/report — submit a hazard report\n"
         "/subscribe — get alerts for an area\n/unsubscribe — stop alerts\n"
         "/ask <question> — ask the hazard info assistant\n"
+        "/fisherman — verify cooperative membership\n"
+        "/sea — nearby sea-state\n/pfz — potential fishing zones\n"
         "/cancel — abort a report",
         parse_mode="Markdown",
     )
@@ -127,9 +151,9 @@ async def cmd_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text("Unsubscribed." if n else "You weren't subscribed to anything.")
 
 
-def _hazard_keyboard() -> InlineKeyboardMarkup:
+def _hazard_keyboard(lang: str = "en") -> InlineKeyboardMarkup:
     rows, row = [], []
-    for hazard_type, label in conv.hazard_menu_items():
+    for hazard_type, label in conv.hazard_menu_items(lang):
         row.append(InlineKeyboardButton(label, callback_data=f"hz:{hazard_type}"))
         if len(row) == 2:
             rows.append(row)
@@ -141,7 +165,8 @@ def _hazard_keyboard() -> InlineKeyboardMarkup:
 
 async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> conv.ConvState:
     context.user_data.clear()
-    session, prompt = conv.start()
+    lang = conv.normalize_lang(update.effective_user.language_code)
+    session, prompt = conv.start(lang=lang)
     context.user_data["session"] = session
     keyboard = ReplyKeyboardMarkup(
         [[KeyboardButton("📍 Share my location", request_location=True)]],
@@ -159,7 +184,7 @@ async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> con
     loc = update.message.location
     session, prompt = conv.on_location(context.user_data["session"], loc.latitude, loc.longitude)
     context.user_data["session"] = session
-    await update.message.reply_text(prompt, reply_markup=_hazard_keyboard())
+    await update.message.reply_text(prompt, reply_markup=_hazard_keyboard(session.lang))
     await update.message.reply_text("…", reply_markup=ReplyKeyboardRemove())
     return session.state
 
@@ -170,21 +195,21 @@ async def on_hazard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> conv.
     hazard_type = query.data.removeprefix("hz:")
     session, prompt = conv.on_hazard(context.user_data["session"], hazard_type)
     context.user_data["session"] = session
-    await query.edit_message_text(prompt.replace("(or skip):", "(or /skip):"))
+    await query.edit_message_text(_with_skip_hint(prompt, session.lang))
     return session.state
 
 
 async def on_description(update: Update, context: ContextTypes.DEFAULT_TYPE) -> conv.ConvState:
     session, prompt = conv.on_description(context.user_data["session"], update.message.text)
     context.user_data["session"] = session
-    await update.message.reply_text(("Got it. " + prompt).replace("(or skip):", "(or /skip):"))
+    await update.message.reply_text(_with_skip_hint("Got it. " + prompt, session.lang))
     return session.state
 
 
 async def skip_description(update: Update, context: ContextTypes.DEFAULT_TYPE) -> conv.ConvState:
     session, prompt = conv.skip_description(context.user_data["session"])
     context.user_data["session"] = session
-    await update.message.reply_text(prompt.replace("(or skip):", "(or /skip):"))
+    await update.message.reply_text(_with_skip_hint(prompt, session.lang))
     return session.state
 
 
@@ -199,7 +224,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> conv.C
         await update.message.reply_text("Couldn't transcribe that — continuing without a description.")
     session, prompt = conv.on_description(context.user_data["session"], transcript)
     context.user_data["session"] = session
-    await update.message.reply_text(prompt.replace("(or skip):", "(or /skip):"))
+    await update.message.reply_text(_with_skip_hint(prompt, session.lang))
     return session.state
 
 
@@ -283,6 +308,91 @@ async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(text)
 
 
+async def cmd_fisherman(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    keyboard = ReplyKeyboardMarkup(
+        [[KeyboardButton("📱 Share my phone number", request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+    await update.message.reply_text(
+        "Fisherman mode gives your account elevated trust once your cooperative "
+        "membership is confirmed. Share the phone number registered with your "
+        "cooperative to verify.",
+        reply_markup=keyboard,
+    )
+    return FISHERMAN_PHONE
+
+
+async def on_fisherman_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    phone = update.message.contact.phone_number
+    user = update.effective_user
+
+    def _register():
+        db = SessionLocal()
+        try:
+            return fisherman_service.register_fisherman(db, "telegram", str(user.id), phone)
+        finally:
+            db.close()
+
+    reporter, cooperative = await asyncio.to_thread(_register)
+    if reporter is None:
+        await update.message.reply_text(
+            "That number isn't on a cooperative's roll yet. Ask your cooperative "
+            "to register it with OceanPing, or contact support.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+    else:
+        await update.message.reply_text(
+            f"✅ Verified as a member of {cooperative}. Your reports now start "
+            "with elevated trust. Try /sea or /pfz any time for local sea-state "
+            "and fishing-zone info.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+    return ConversationHandler.END
+
+
+async def cmd_sea(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    def _fetch():
+        db = SessionLocal()
+        try:
+            return fisherman_service.nearest_station_reading(db)
+        finally:
+            db.close()
+
+    reading = await asyncio.to_thread(_fetch)
+    if reading is None:
+        await update.message.reply_text("No instrument stations are configured yet.")
+        return
+    lines = [f"🌊 Nearest station: {reading['station_name']} ({reading['distance_km']} km away)"]
+    if not reading["is_local"]:
+        lines.append("⚠️ That's far from this pilot area — no closer station is configured yet.")
+    for variable, point in reading["latest"].items():
+        lines.append(f"{variable}: {point['value']}")
+    if not reading["latest"]:
+        lines.append("No readings in the last 24h.")
+    for a in reading["anomalies"]:
+        lines.append(f"⚠️ {a['variable']} anomaly (z={a['zscore']})")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_pfz(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    def _fetch():
+        db = SessionLocal()
+        try:
+            return fisherman_service.active_pfz_advisories(db)
+        finally:
+            db.close()
+
+    zones = await asyncio.to_thread(_fetch)
+    if not zones:
+        await update.message.reply_text("No potential fishing zone advisory is active right now.")
+        return
+    lines = [f"🎣 Potential Fishing Zones — {pfz_mod.PILOT_SECTOR}:"]
+    for z in zones:
+        lines.append(f"• {z['bearing']}, depth ~{z['depth_m']} m")
+    await update.message.reply_text("\n".join(lines))
+
+
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     await update.message.reply_text("Report cancelled.", reply_markup=ReplyKeyboardRemove())
@@ -313,6 +423,11 @@ def main() -> None:
         },
         fallbacks=[CommandHandler("cancel", cmd_cancel)],
     )
+    fisherman_conv = ConversationHandler(
+        entry_points=[CommandHandler("fisherman", cmd_fisherman)],
+        states={FISHERMAN_PHONE: [MessageHandler(filters.CONTACT, on_fisherman_contact)]},
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+    )
     subscribe_conv = ConversationHandler(
         entry_points=[CommandHandler("subscribe", cmd_subscribe)],
         states={SUBSCRIBE_LOCATION: [MessageHandler(filters.LOCATION, on_subscribe_location)]},
@@ -320,9 +435,12 @@ def main() -> None:
     )
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(conv_handler)
+    app.add_handler(fisherman_conv)
     app.add_handler(subscribe_conv)
     app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
     app.add_handler(CommandHandler("ask", cmd_ask))
+    app.add_handler(CommandHandler("sea", cmd_sea))
+    app.add_handler(CommandHandler("pfz", cmd_pfz))
     log.info("OceanPing Telegram bot polling…")
     app.run_polling()
 

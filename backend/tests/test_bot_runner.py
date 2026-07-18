@@ -6,10 +6,11 @@ from app.modules.ingest.service import RateLimited
 
 
 class FakeMessage:
-    def __init__(self, text=None, location=None, photo=None):
+    def __init__(self, text=None, location=None, photo=None, contact=None):
         self.text = text
         self.location = location
         self.photo = photo
+        self.contact = contact
         self.sent = []
 
     async def reply_text(self, text, **kwargs):
@@ -41,11 +42,16 @@ class FakePhotoSize:
         return FakePhotoFile()
 
 
+class FakeContact:
+    def __init__(self, phone_number):
+        self.phone_number = phone_number
+
+
 class FakeUpdate:
-    def __init__(self, message=None, callback_query=None, user_id=42, chat_id=42):
+    def __init__(self, message=None, callback_query=None, user_id=42, chat_id=42, language_code=None):
         self.message = message
         self.callback_query = callback_query
-        self.effective_user = SimpleNamespace(id=user_id)
+        self.effective_user = SimpleNamespace(id=user_id, language_code=language_code)
         self.effective_chat = SimpleNamespace(id=chat_id)
 
 
@@ -170,3 +176,119 @@ def test_cancel_clears_user_data():
     asyncio.run(bot_runner.cmd_cancel(FakeUpdate(message=msg), context))
     assert context.user_data == {}
     assert "cancelled" in msg.sent[0].lower()
+
+
+def test_cmd_report_uses_telegram_client_language_for_localized_prompt():
+    context = FakeContext()
+    update = FakeUpdate(message=FakeMessage(), language_code="ta-IN")
+
+    asyncio.run(bot_runner.cmd_report(update, context))
+
+    session = context.user_data["session"]
+    assert session.lang == "ta"
+    assert conv.PROMPTS_BY_LANG["ta"]["location"].rstrip(".") in update.message.sent[0]
+
+
+def test_cmd_report_falls_back_to_english_for_unsupported_client_language():
+    context = FakeContext()
+    update = FakeUpdate(message=FakeMessage(), language_code="fr-FR")
+
+    asyncio.run(bot_runner.cmd_report(update, context))
+
+    assert context.user_data["session"].lang == "en"
+
+
+# --- fisherman mode (phase 2, milestone 5) ------------------------------------
+
+def test_fisherman_registration_verifies_known_roster_member(monkeypatch):
+    monkeypatch.setattr(bot_runner, "SessionLocal", _no_op_session_local)
+    monkeypatch.setattr(
+        bot_runner.fisherman_service,
+        "register_fisherman",
+        lambda db, source, external_id, phone: (
+            SimpleNamespace(id="r1", role="fisherman"),
+            "Kasimedu Fishermen Welfare Cooperative",
+        ),
+    )
+    context = FakeContext()
+
+    async def run():
+        state = await bot_runner.cmd_fisherman(FakeUpdate(message=FakeMessage()), context)
+        assert state == bot_runner.FISHERMAN_PHONE
+        msg = FakeMessage(contact=FakeContact("+919840012345"))
+        result = await bot_runner.on_fisherman_contact(FakeUpdate(message=msg), context)
+        return result, msg
+
+    result, msg = asyncio.run(run())
+    assert result == bot_runner.ConversationHandler.END
+    assert any("Kasimedu Fishermen Welfare Cooperative" in text for text in msg.sent)
+
+
+def test_fisherman_registration_rejects_unknown_phone_number(monkeypatch):
+    monkeypatch.setattr(bot_runner, "SessionLocal", _no_op_session_local)
+    monkeypatch.setattr(
+        bot_runner.fisherman_service, "register_fisherman", lambda db, source, external_id, phone: (None, None)
+    )
+    context = FakeContext()
+
+    async def run():
+        msg = FakeMessage(contact=FakeContact("+910000000000"))
+        return await bot_runner.on_fisherman_contact(FakeUpdate(message=msg), context), msg
+
+    result, msg = asyncio.run(run())
+    assert result == bot_runner.ConversationHandler.END
+    assert any("cooperative's roll" in text for text in msg.sent)
+
+
+def test_cmd_sea_reports_nearest_station(monkeypatch):
+    monkeypatch.setattr(bot_runner, "SessionLocal", _no_op_session_local)
+    monkeypatch.setattr(
+        bot_runner.fisherman_service,
+        "nearest_station_reading",
+        lambda db: {
+            "station_id": "ndbc-46026", "station_name": "NDBC Buoy 46026", "distance_km": 12000.0,
+            "is_local": False, "latest": {"wave_height": {"value": 1.2, "time": "2026-07-18T00:00:00+00:00"}},
+            "anomalies": [],
+        },
+    )
+    msg = FakeMessage()
+
+    asyncio.run(bot_runner.cmd_sea(FakeUpdate(message=msg), FakeContext()))
+
+    assert any("NDBC Buoy 46026" in text for text in msg.sent)
+    assert any("far from this pilot area" in text for text in msg.sent)
+
+
+def test_cmd_sea_reports_no_stations_configured(monkeypatch):
+    monkeypatch.setattr(bot_runner, "SessionLocal", _no_op_session_local)
+    monkeypatch.setattr(bot_runner.fisherman_service, "nearest_station_reading", lambda db: None)
+    msg = FakeMessage()
+
+    asyncio.run(bot_runner.cmd_sea(FakeUpdate(message=msg), FakeContext()))
+
+    assert any("No instrument stations" in text for text in msg.sent)
+
+
+def test_cmd_pfz_lists_active_zones(monkeypatch):
+    monkeypatch.setattr(bot_runner, "SessionLocal", _no_op_session_local)
+    monkeypatch.setattr(
+        bot_runner.fisherman_service,
+        "active_pfz_advisories",
+        lambda db: [{"lat": 13.1, "lon": 80.4, "depth_m": 45.0, "distance_km": 30.0,
+                     "bearing": "30.0 km NE of Kasimedu", "valid_until": "2026-07-20T00:00:00+00:00"}],
+    )
+    msg = FakeMessage()
+
+    asyncio.run(bot_runner.cmd_pfz(FakeUpdate(message=msg), FakeContext()))
+
+    assert any("Kasimedu" in text for text in msg.sent)
+
+
+def test_cmd_pfz_reports_no_active_advisory(monkeypatch):
+    monkeypatch.setattr(bot_runner, "SessionLocal", _no_op_session_local)
+    monkeypatch.setattr(bot_runner.fisherman_service, "active_pfz_advisories", lambda db: [])
+    msg = FakeMessage()
+
+    asyncio.run(bot_runner.cmd_pfz(FakeUpdate(message=msg), FakeContext()))
+
+    assert any("No potential fishing zone" in text for text in msg.sent)
