@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.db import SessionLocal
 from app.core.scheduler import build_scheduler
 from app.modules.alerts.router import router as alerts_router
+from app.modules.chat.router import router as chat_router
 from app.modules.delivery.router import router as delivery_router
 from app.modules.analyst.router import router as analyst_router
 from app.modules.drill.router import router as drill_router
@@ -19,6 +20,7 @@ log = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from app.modules.chat.corpus import seed_corpus
     from app.modules.sensors.service import sync_stations
 
     db = SessionLocal()
@@ -26,6 +28,15 @@ async def lifespan(app: FastAPI):
         sync_stations(db)
     except Exception:
         log.exception("Station sync failed at startup")
+        db.rollback()
+    finally:
+        db.close()
+
+    db = SessionLocal()
+    try:
+        seed_corpus(db)
+    except Exception:
+        log.exception("Chat corpus seed failed at startup")
         db.rollback()
     finally:
         db.close()
@@ -51,6 +62,7 @@ app.include_router(analyst_router)
 app.include_router(alerts_router)
 app.include_router(delivery_router)
 app.include_router(drill_router)
+app.include_router(chat_router)
 
 
 @app.get("/healthz")

@@ -38,6 +38,7 @@ services:
       NLP_MODEL_VERSION: ${NLP_MODEL_VERSION:-}
       ERDDAP_POLL_MINUTES: ${ERDDAP_POLL_MINUTES:-10}
       VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     ports:
       - "8000:8000"
     volumes:
@@ -84,6 +85,7 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       NLP_MODE: ${NLP_MODE:-embedding}
       NLP_MODEL_VERSION: ${NLP_MODEL_VERSION:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     volumes:
       - media:/data/media
       - hfcache:/root/.cache/huggingface

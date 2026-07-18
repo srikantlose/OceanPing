@@ -255,6 +255,32 @@ class ModelVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
+class RagDocument(Base):
+    __tablename__ = "rag_documents"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    source: Mapped[str] = mapped_column(String(32), default="hazard_faq")
+    title: Mapped[str] = mapped_column(String(256))
+    content: Mapped[str] = mapped_column(Text)
+    lang: Mapped[str] = mapped_column(String(8), default="en")
+    embedding: Mapped[list | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class ChatLog(Base):
+    __tablename__ = "chat_logs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=new_uuid)
+    channel: Mapped[str] = mapped_column(String(16), default="web")  # web | telegram
+    question: Mapped[str] = mapped_column(Text)
+    answer: Mapped[str] = mapped_column(Text)
+    retrieved_doc_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    retrieval_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    is_evacuation_directive: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_fallback: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
 class SatelliteObservation(Base):
     __tablename__ = "satellite_observations"
 

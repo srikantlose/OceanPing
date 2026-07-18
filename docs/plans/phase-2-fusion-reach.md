@@ -1,9 +1,9 @@
 # Phase 2 — Fusion & Reach (blueprint weeks 15–24, gap plan)
 
-**Status: 🟡 in progress (July 2026).** Milestone 2 (satellite + six-signal rebalance)
-built. Milestone 1 (INCOIS real datasets) investigated and found blocked on external data
-availability — see below — deferred rather than faked. Prereqs: phase 0 (built); phase 1
-delivery worker for new channels.
+**Status: 🟡 in progress (July 2026).** Milestones 2 (satellite + six-signal rebalance)
+and 3 (RAG chatbot) built. Milestone 1 (INCOIS real datasets) investigated and found
+blocked on external data availability — see below — deferred rather than faked. Prereqs:
+phase 0 (built); phase 1 delivery worker for new channels.
 **Independent items** (can land before phase 1 completes): satellite corroboration, INCOIS
 dataset IDs, station config → DB, RAG chatbot.
 
@@ -106,6 +106,83 @@ Confirmed the scheduler registered all five jobs (including `satellite_poll`) cl
 startup. Confirmed the frontend's compiled JS bundle contains the new `Account/device`
 label (a build-time proxy check — no browser-automation tool was available in this
 session to click through the dashboard itself, same limitation noted in milestone 5).
+
+## Milestone 3 — as built
+
+Retrieval-augmented chat is live, grounded on a hand-authored hazard-safety FAQ corpus:
+
+- `backend/app/models.py` — `RagDocument` (id is a human-readable slug like
+  `faq-alert-tiers`, `String(64)` primary key, same idempotent-upsert-by-id pattern as
+  `Station`, not a UUID) and `ChatLog` (question, answer, retrieved_doc_ids, retrieval_
+  score, is_evacuation_directive, is_fallback). Migration `0007_chat.py` (follows `0004`/
+  `0006`'s `create_all` pattern for new tables).
+- `backend/app/modules/chat/corpus.py` — 12 hand-written hazard-safety FAQ entries
+  (hazard types, alert tiers, report statuses, tsunami/rip-current/oil-spill/algal-bloom
+  safety info, how reporting and trust scores work, an emergency-contact entry). This is
+  educational reference content, written so it would never itself read as a real-time
+  evacuation directive - `seed_corpus(db)` upserts it into `rag_documents` at startup
+  (`main.py`'s `lifespan()`, right alongside the existing `sync_stations()` call),
+  embedding each entry with the same multilingual sentence-transformer `classify()` uses.
+  Real INCOIS advisories / PFZ bulletins / a shelter list were named as corpus sources in
+  the original plan too; scraping a live feed or building the shelters table (milestone 6)
+  is out of scope here - shipped with real, useful, honestly-sourced content instead of
+  faking external sources this session has no way to verify.
+- `backend/app/modules/chat/llm.py` — `AnthropicAdapter.complete()`, a plain `httpx` call
+  to the Messages API (no new SDK dependency - `httpx` is already used this way by every
+  other adapter in `delivery/adapters.py`), gated on `settings.anthropic_api_key` exactly
+  like Twilio/Exotel are gated on their own credentials. Unconfigured means the endpoint
+  always returns the helpline fallback, never a crash.
+- `backend/app/modules/chat/service.py::answer()` — two safety rules enforced **in code**,
+  not just in the system prompt, per the plan:
+  1. `is_evacuation_directive()` (a keyword heuristic, same honest scoping as
+     `classifier.py::detect_hearsay()` - no labeled data exists to train a real classifier)
+     hard-bypasses retrieval and the LLM entirely for questions like "should I evacuate?",
+     returning the helpline message plus a live lookup of active alerts near the asker's
+     location (by lat/lon for the web client, or by a Telegram subscriber's already-stored
+     geofence cells directly - no lossy cells→lat/lon→cells round trip).
+  2. Any other question's best retrieval match below `chat_retrieval_threshold` also never
+     reaches the LLM - same fallback. `retrieve()` fetches the (small, code-seeded) corpus
+     and ranks it by cosine similarity in Python, the same pattern `nlp/dedup.py` already
+     uses for incident-merge similarity (no pgvector SQL distance operator is used
+     anywhere in this codebase yet, so this doesn't introduce a new one without reason).
+  Every question is logged to `chat_logs` regardless of which path it took.
+- `backend/app/modules/chat/router.py` — public `POST /chat` (no analyst auth, same trust
+  boundary as `/reports` and `/map/*`).
+- `backend/app/modules/ingest/bot_runner.py` — new `/ask <question>` command, passing the
+  subscriber's stored geofence cells (if subscribed) straight through as `alert_cells`.
+- `docker-compose.yml` — `ANTHROPIC_API_KEY` threaded through `backend` and `bot` (both
+  call `chat/service.py::answer()` directly).
+- Tests: `test_chat_corpus.py` (id uniqueness, non-empty content, the corpus never itself
+  reads as an evacuation directive, seed/upsert with and without an embedder available),
+  `test_chat_llm.py` (credential gate, response parsing, HTTP-error and empty-content
+  handling - real `httpx.Response` objects, no live API call), `test_chat_service.py`
+  (evacuation-directive detection, cosine ranking, and - the important one - that the
+  evacuation bypass and the low-score fallback each *provably* never call the embedder or
+  LLM adapter, by monkeypatching them to raise if invoked).
+
+**Verified live, not just under mocks:** rebuilt the image and confirmed `seed_corpus()`
+embedded all 12 corpus entries at real startup (`psql` showed every row with a non-null
+embedding). Exercised `/chat` live with six real questions spanning clearly on-topic,
+loosely-phrased-but-relevant, and clearly off-topic - `chat_logs.retrieval_score` showed
+closely-phrased questions ("what are the warning signs of a tsunami?") scoring 0.75+
+against their correct document, loosely-phrased-but-relevant ones ("who do I contact in an
+emergency?") scoring ~0.34-0.39, and off-topic ones ("what's the capital of France?" / "tell
+me a joke about pizza") scoring 0.05-0.10 - a clear, real separation. **Found and fixed a
+real calibration bug from this data**: the initial `chat_retrieval_threshold` guess (0.45)
+sat *above* the loosely-phrased-relevant cluster, meaning real, correctly-matched questions
+like "who do I contact in an emergency?" would have been wrongly rejected; rebalanced to
+0.28 (documented with the data in `config.py`) and reverified live that the same question
+now clears the gate. Also exercised the evacuation-directive path live with a real
+location near the Chennai Marina drill data and confirmed it returned the actual active
+alerts near that point (8 real alerts from prior drill runs), never reaching retrieval or
+the LLM. No `ANTHROPIC_API_KEY` is configured in this environment, so the real-answer path
+(LLM call succeeding) is unverified live - covered by mocked tests only, same status as
+Twilio/Exotel/Sentinel Hub elsewhere in this project.
+
+**Not built:** a frontend chat widget. The plan's milestone-3 deliverable is the retrieval
++ generation + safety-gate seam and the endpoints (`POST /chat` + bot `/ask`); no chat UI
+component was in the gap-work breakdown's action items, so none was added - `/chat` is
+reachable from any web client already.
 
 ## Goals
 
@@ -218,7 +295,8 @@ drills, or (c) the phase-3 service split begins. Record the decision here when t
    coastal tide-gauge dataset exists on INCOIS's public ERDDAP (see milestone 1's "as
    built" section above). Revisit if that changes.
 2. ✅ Satellite module with StubProvider + six-signal rebalance
-3. RAG chatbot (web + Telegram)
+3. ✅ RAG chatbot (web + Telegram) — real Anthropic-answer path unverified live, no key
+   configured in this environment; retrieval + safety gates fully verified live
 4. Channel-agnostic conversation core + WhatsApp adapter + IVR webhook
 5. Fisherman mode (roles, PFZ surfaces)
 6. Valhalla routing + shelters + public map routing UI
@@ -229,8 +307,12 @@ drills, or (c) the phase-3 service split begins. Record the decision here when t
   satellite component appears in `confidence_components`, instrument stays exactly 0,
   and the assertion is live in `scripts/drill.py` (not just a mocked unit test); six-weight
   tests updated in `test_scoring_engine.py`.
-- Chat eval set: ~30 questions incl. adversarial ("should I evacuate?") — assert fallback
-  behavior; retrieval-threshold unit test.
+- ✅ Chat: adversarial ("should I evacuate?") verified live to bypass retrieval/LLM and
+  return real nearby alerts; retrieval-threshold enforcement verified both live (six real
+  questions, see milestone 3) and under mocked unit tests
+  (`test_chat_service.py`). A full ~30-question eval set incl. more adversarial phrasings
+  is still open for whoever configures a real `ANTHROPIC_API_KEY` and wants to validate
+  actual generated answer quality, not just the safety-gate plumbing.
 - IVR: simulated webhook payload → report with `source="ivr"` and correct village geocode.
 - Routing: request from a point inside a drill flood zone → route avoids closed cells
   (assert no polyline vertex inside excluded polygons).

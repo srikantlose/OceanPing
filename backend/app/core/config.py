@@ -96,6 +96,30 @@ class Settings(BaseSettings):
     sentinel_hub_client_secret: str = ""
     earth_engine_service_account_json: str = ""
 
+    # RAG chatbot (phase 2, milestone 3): retrieval is always on (it's just
+    # sentence-transformer cosine similarity over rag_documents, no API key
+    # needed); an empty anthropic_api_key means /chat always returns
+    # chat_helpline_message instead of a generated answer — same credential-
+    # gated-degrade pattern as every other real adapter in this app. The
+    # retrieval threshold is enforced in code (chat/service.py), not just in
+    # the system prompt, so a low-relevance question never reaches the LLM.
+    anthropic_api_key: str = ""
+    anthropic_model: str = "claude-sonnet-5"
+    # Calibrated against the live corpus, not guessed: differently-phrased but
+    # genuinely on-topic questions ("who do I contact in an emergency?" against
+    # faq-helpline) scored ~0.34-0.40 cosine similarity with this multilingual
+    # sentence-transformer model, closely-phrased ones scored 0.75+, and clearly
+    # off-topic questions ("what's the capital of France?") scored ~0.05-0.10.
+    # 0.45 (a round-number guess) would have rejected real, correctly-matched
+    # questions - 0.28 sits with margin above the off-topic cluster and below
+    # the loosely-phrased-but-relevant one.
+    chat_retrieval_threshold: float = 0.28
+    chat_helpline_message: str = (
+        "I can't confidently answer that from official sources. Please check "
+        "current alerts on the map, or contact your local disaster helpline "
+        "(India: dial 112, or the NDMA control room at 1078)."
+    )
+
     class Config:
         env_file = ".env"
         extra = "ignore"

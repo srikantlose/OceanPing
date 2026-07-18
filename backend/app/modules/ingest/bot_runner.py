@@ -32,6 +32,7 @@ from app.core.config import get_settings
 from app.core.db import SessionLocal
 from app.models import HAZARD_TYPES, Subscription
 from app.modules.alerts.geofence import cells_around
+from app.modules.chat import service as chat_service
 from app.modules.ingest import voice
 from app.modules.ingest.service import RateLimited, create_report
 
@@ -61,8 +62,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Your report is cross-checked against ocean sensors and nearby reports "
         "before authorities see it as verified.\n\n"
         "Use /subscribe to get alerts for hazards near a place you care about.\n\n"
+        "Use /ask followed by a question to ask about hazards, alert tiers, or "
+        "coastal safety in general.\n\n"
         "Commands:\n/report — submit a hazard report\n"
         "/subscribe — get alerts for an area\n/unsubscribe — stop alerts\n"
+        "/ask <question> — ask the hazard info assistant\n"
         "/cancel — abort a report",
         parse_mode="Markdown",
     )
@@ -251,6 +255,37 @@ async def skip_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return await _submit(update, context, None)
 
 
+async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    question = " ".join(context.args) if context.args else ""
+    if not question.strip():
+        await update.message.reply_text(
+            "Ask a question after /ask, e.g. `/ask what does watch tier mean?`",
+            parse_mode="Markdown",
+        )
+        return
+    chat_id = str(update.effective_chat.id)
+
+    def _answer():
+        db = SessionLocal()
+        try:
+            sub = db.scalar(
+                select(Subscription)
+                .where(Subscription.channel == "telegram")
+                .where(Subscription.address == chat_id)
+            )
+            cells = sub.h3_cells if sub and sub.h3_cells else None
+            return chat_service.answer(db, question, channel="telegram", alert_cells=cells)
+        finally:
+            db.close()
+
+    result = await asyncio.to_thread(_answer)
+    text = result["answer"]
+    if result.get("alerts"):
+        lines = [f"⚠️ {a['tier'].upper()}: {a['message']}" for a in result["alerts"]]
+        text += "\n\nActive alerts near your subscribed location:\n" + "\n".join(lines)
+    await update.message.reply_text(text)
+
+
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     await update.message.reply_text("Report cancelled.", reply_markup=ReplyKeyboardRemove())
@@ -290,6 +325,7 @@ def main() -> None:
     app.add_handler(conv)
     app.add_handler(subscribe_conv)
     app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
+    app.add_handler(CommandHandler("ask", cmd_ask))
     log.info("OceanPing Telegram bot polling…")
     app.run_polling()
 
