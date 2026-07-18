@@ -120,6 +120,33 @@ class Settings(BaseSettings):
         "(India: dial 112, or the NDMA control room at 1078)."
     )
 
+    # WhatsApp Business Cloud API (phase 2, milestone 4): conversational report
+    # submission through the same channel-agnostic flow Telegram uses
+    # (ingest/report_conversation.py). An empty access token means the
+    # inbound webhook still parses messages and create_report() still runs,
+    # but every outbound reply is skipped - same credential-gated-degrade
+    # pattern as Twilio/Exotel/Sentinel Hub elsewhere in this app. There is no
+    # Meta Business/WhatsApp account in this environment, so outbound sends
+    # and the Meta-side webhook subscription are unverified live; inbound
+    # payload parsing is verified against Meta's documented webhook JSON shape
+    # under mocked tests.
+    whatsapp_access_token: str = ""
+    whatsapp_phone_number_id: str = ""
+    whatsapp_verify_token: str = ""
+    whatsapp_app_secret: str = ""
+    whatsapp_api_version: str = "v20.0"
+
+    # IVR (phase 2, milestone 4): a Twilio Voice webhook returning TwiML.
+    # Exotel's classic Exoml call-control markup is Twilio-compatible for the
+    # Gather/Say/Record verbs this flow uses, so the same endpoint serves
+    # either provider without a code fork. Reuses twilio_account_sid/
+    # twilio_auth_token above to authenticate the recording download - no new
+    # credential needed. The "location" step is a short menu of named pilot
+    # coastal locations (modules/ivr/locations.py) rather than the caller's
+    # real registered village or cell-tower area, since this environment has
+    # no telco integration to look either of those up against.
+    ivr_recording_max_seconds: int = 60
+
     class Config:
         env_file = ".env"
         extra = "ignore"

@@ -1,9 +1,10 @@
 # Phase 2 — Fusion & Reach (blueprint weeks 15–24, gap plan)
 
-**Status: 🟡 in progress (July 2026).** Milestones 2 (satellite + six-signal rebalance)
-and 3 (RAG chatbot) built. Milestone 1 (INCOIS real datasets) investigated and found
-blocked on external data availability — see below — deferred rather than faked. Prereqs:
-phase 0 (built); phase 1 delivery worker for new channels.
+**Status: 🟡 in progress (July 2026).** Milestones 2 (satellite + six-signal rebalance),
+3 (RAG chatbot), and 4 (channel-agnostic conversation core + WhatsApp + IVR) built.
+Milestone 1 (INCOIS real datasets) investigated and found blocked on external data
+availability — see below — deferred rather than faked. Prereqs: phase 0 (built); phase 1
+delivery worker for new channels.
 **Independent items** (can land before phase 1 completes): satellite corroboration, INCOIS
 dataset IDs, station config → DB, RAG chatbot.
 
@@ -184,6 +185,120 @@ Twilio/Exotel/Sentinel Hub elsewhere in this project.
 component was in the gap-work breakdown's action items, so none was added - `/chat` is
 reachable from any web client already.
 
+## Milestone 4 — as built
+
+The location -> hazard -> description -> photo report flow is now shared across
+channels, with WhatsApp and phone-call (IVR) adapters built on top of it:
+
+- `backend/app/modules/ingest/report_conversation.py` (new) — the flow itself, extracted
+  out of `bot_runner.py`: `ConvState` enum, the canonical hazard menu (`HAZARD_LABELS` /
+  `HAZARD_SPEECH_LABELS` / `hazard_menu_items()`, in `HAZARD_TYPES` order so every channel
+  numbers/lists hazards identically), pure transition functions (`start`, `on_location`,
+  `on_hazard`, `on_description`, `skip_description`, `mark_done`) operating on a
+  `ReportSession` dataclass, and `build_report_kwargs()` to assemble `create_report()`'s
+  flow-owned arguments. Fully pure/testable — no I/O. A small Redis-backed session store
+  (`save_session`/`load_session`/`clear_session`, same client and key-style convention as
+  `ingest/service.py`'s rate limiter) is exported alongside it for channels whose webhook
+  calls are stateless HTTP requests with no in-process home for a session object between
+  messages (WhatsApp) — Telegram doesn't need it, since python-telegram-bot's
+  `context.user_data` already holds the `ReportSession` for the life of the conversation.
+- `backend/app/modules/ingest/bot_runner.py` — refactored into a thin adapter: every
+  handler now calls into `report_conversation` for the prompt/next-state and just
+  translates it to/from Telegram's Update/context objects. `ConvState` enum members are
+  used directly as python-telegram-bot's `ConversationHandler` state keys (PTB only
+  requires hashable state keys, not ints) — no behavior change versus the pre-refactor
+  bot, confirmed by a full fake-Update walkthrough of the flow (new `test_bot_runner.py`,
+  since this file previously had zero test coverage) and a live rebuild/run of the bot
+  container.
+- `backend/app/modules/whatsapp/` (new) — the WhatsApp Business Cloud API adapter:
+  - `client.py` — plain `httpx` calls to the Graph API (`send_text`, `send_hazard_menu` as
+    an interactive list message, `download_media`, `verify_signature` for the
+    `X-Hub-Signature-256` header), gated on `whatsapp_access_token`/
+    `whatsapp_phone_number_id` exactly like every other adapter in this app — unconfigured
+    means outbound sends silently no-op and signature verification is skipped (logged),
+    never a crash.
+  - `service.py::handle_payload()` — parses Meta's webhook message shape and drives the
+    same `report_conversation` state machine Telegram uses, keyed by the sender's phone
+    number in the Redis session store. Trigger words start a session; `cancel` clears one;
+    a wrong message type for the current state re-prompts instead of erroring.
+  - `router.py` — `GET /webhooks/whatsapp` (verify-token challenge) and
+    `POST /webhooks/whatsapp` (signature check, then dispatch). Public, no analyst auth —
+    the signature check is the real gate, same trust model as `/chat` and the Telegram bot.
+  - `delivery/adapters.py` gained `WhatsAppAdapter` (alert fan-out, not the conversational
+    flow — a separate concern, same as Telegram's `TelegramAdapter` vs. `bot_runner.py`)
+    and `get_adapter("whatsapp")` dispatch.
+- `backend/app/modules/ivr/` (new) — a Twilio Voice webhook (TwiML in/out); Exotel's
+  classic Exoml call-control markup is Twilio-compatible for the Gather/Say/Record verbs
+  used here, so one implementation serves either provider without a fork:
+  - `locations.py` — a short list of named pilot coastal locations (Marina Beach, Besant
+    Nagar/Elliot's Beach, Kasimedu, Injambakkam, Ennore) selectable by a single DTMF digit —
+    an honest stand-in for a real registered-village/cell-tower lookup, which this
+    environment has no telco integration to reach or verify, same role `StubProvider`
+    plays for satellite imagery.
+  - `service.py` — hazard digit (1–9, from `report_conversation`'s canonical menu) ->
+    location digit -> a recorded voice description -> `create_report(source="ivr")`. The
+    description reuses the exact same Whisper transcription (`ingest/voice.py`) the
+    Telegram bot already uses for voice notes; the recording download reuses the existing
+    `twilio_account_sid`/`twilio_auth_token` credentials (no new credential needed).
+    Call state between webhook steps lives in Redis keyed by `CallSid` — a plain dict, not
+    `ReportSession`, since IVR's digit-menu shape doesn't match the free-text-location/photo
+    state machine WhatsApp and Telegram share.
+  - `router.py` — `POST /webhooks/ivr/voice`, one endpoint for all steps (`?step=` query
+    param), form-encoded per Twilio's convention.
+  - **Deferred, not half-built:** the phase-2 plan's "language → hazard digit → location"
+    wording implies a language-selection step, but that's meaningless without translated
+    prompt strings to switch to — Tamil/Telugu localization is already explicitly scoped
+    to milestone 5 (fisherman mode), so the language step ships there together with real
+    translated strings rather than as an empty menu here.
+- `docker-compose.yml` — `WHATSAPP_*` threaded through `backend` (inbound webhook) and
+  `worker` (outbound `WhatsAppAdapter`); `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN` added to
+  `backend` too (previously only `worker` had them), since the IVR recording download now
+  runs there.
+- Tests: `test_report_conversation.py` (pure transitions, invalid-state/invalid-hazard
+  errors, session-store roundtrip and Redis-down degradation), `test_bot_runner.py` (fake
+  Telegram Update/context objects driving the full refactored flow end to end, plus
+  rate-limit and cancel paths), `test_whatsapp_client.py` (credential gates, payload
+  shapes, signature verification with real HMAC), `test_whatsapp_service.py` (full webhook
+  payload fixtures matching Meta's documented shape, covering trigger/help/cancel/
+  wrong-state/happy-path/skip/rate-limited branches), `test_ivr_service.py` (TwiML output
+  per step, digit validation, the full hazard→location→recording→create_report path, the
+  Twilio-recording-download credential gate), and `WhatsAppAdapter` additions to
+  `test_delivery_adapters.py`.
+
+**Verified live, not just under mocks:** rebuilt and restarted `backend`, `worker`, and
+`bot`. Posted a full, realistic Meta webhook message sequence (trigger word → location →
+interactive list-reply hazard pick → free-text description → skip) directly at the running
+`backend`'s `/webhooks/whatsapp` and confirmed via `psql` a real `reports` row landed
+(`source=whatsapp`, `hazard_type=oil_spill`, correct text) and that the Redis conversation
+session (`report_conv:whatsapp:...`) was cleared afterward. Also verified live: an
+unconfigured verify-token correctly 403s the `GET` challenge, and an unrecognized message
+with no active session gets the help-text fallback rather than crashing. Separately posted a
+full Twilio-style form-encoded call sequence (start → hazard digit 6 → location digit 1 →
+recording callback with no `RecordingUrl`, since Twilio isn't configured here) at
+`/webhooks/ivr/voice` and confirmed a second real `reports` row (`source=ivr`,
+`hazard_type=oil_spill`, Marina Beach's coordinates, `text=NULL` since there was no
+recording to transcribe) plus correct TwiML at every step. **A real regression this testing
+caught and fixed**: `handle_hazard`'s digit-to-hazard lookup used `items[int(digit) - 1]`,
+so digit `"0"` silently wrapped via Python's negative indexing to `items[-1]` ("other")
+instead of being rejected — caught by `test_ivr_service.py`, fixed with an explicit
+`1 <= idx <= len(items)` range check, and reconfirmed live (`Digits=0` now returns "Invalid
+selection"). Checked backend/worker logs for both runs: no exceptions. Rebuilt and ran the
+`bot` container: it still starts cleanly and degrades exactly as before
+(`TELEGRAM_BOT_TOKEN not set — bot disabled`) — there is no real Telegram bot token in this
+environment (same gap as every other channel credential this project has hit), so the
+refactored `bot_runner.py` can't be driven through actual Telegram polling; its handler
+logic is instead covered end-to-end by `test_bot_runner.py`'s fake-Update walkthrough, and
+the shared `report_conversation` core it now depends on was exercised for real by the live
+WhatsApp run above. No Meta Business/WhatsApp account or Twilio/Exotel account exists in
+this environment, so outbound sends (`WhatsAppAdapter`, `client.send_text`/
+`send_hazard_menu`) and the recording download are unverified live — covered by mocked
+tests only, same status as Sentinel Hub/Earth Engine/Anthropic elsewhere in this project.
+
+**Not built:** IVR language selection (see above — deferred to milestone 5 alongside
+Tamil/Telugu localization); a WhatsApp "subscribe" or `/ask`-equivalent chat entry point
+(milestone 4's scope is the report-submission flow; WhatsApp subscribe/chat parity with
+Telegram wasn't in the gap-work breakdown's action items for this milestone).
+
 ## Goals
 
 Add the third and fourth verification streams (satellite, richer instruments), meet people
@@ -297,7 +412,11 @@ drills, or (c) the phase-3 service split begins. Record the decision here when t
 2. ✅ Satellite module with StubProvider + six-signal rebalance
 3. ✅ RAG chatbot (web + Telegram) — real Anthropic-answer path unverified live, no key
    configured in this environment; retrieval + safety gates fully verified live
-4. Channel-agnostic conversation core + WhatsApp adapter + IVR webhook
+4. ✅ Channel-agnostic conversation core + WhatsApp adapter + IVR webhook — real WhatsApp
+   webhook and IVR call flow verified live end-to-end against the running stack (real
+   `reports` rows created); outbound WhatsApp sends and Twilio recording download
+   unverified live, no real Meta/Twilio account in this environment; IVR language
+   selection deferred to milestone 5
 5. Fisherman mode (roles, PFZ surfaces)
 6. Valhalla routing + shelters + public map routing UI
 
@@ -313,6 +432,13 @@ drills, or (c) the phase-3 service split begins. Record the decision here when t
   (`test_chat_service.py`). A full ~30-question eval set incl. more adversarial phrasings
   is still open for whoever configures a real `ANTHROPIC_API_KEY` and wants to validate
   actual generated answer quality, not just the safety-gate plumbing.
-- IVR: simulated webhook payload → report with `source="ivr"` and correct village geocode.
+- ✅ IVR: simulated Twilio-style webhook payload sequence → real report with
+  `source="ivr"` and the correct pilot-location coordinates (village/cell-tower geocoding
+  isn't available in this environment — see milestone 4's "as built" section for why a
+  named-location menu stands in for it); verified live against the running stack, not just
+  under mocks.
+- ✅ WhatsApp: full webhook conversation (trigger → location → hazard → description →
+  skip) verified live to create a real report with `source="whatsapp"`; verify-token
+  rejection and the no-session help-text fallback also verified live.
 - Routing: request from a point inside a drill flood zone → route avoids closed cells
   (assert no polyline vertex inside excluded polygons).

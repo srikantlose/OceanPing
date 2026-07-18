@@ -151,11 +151,58 @@ def test_exotel_adapter_posts_expected_payload_with_basic_auth(monkeypatch):
     assert captured["url"].startswith("https://api.exotel.com/")
 
 
+# ---------- WhatsApp ----------
+
+def test_whatsapp_adapter_skips_without_credentials(monkeypatch):
+    monkeypatch.setattr(
+        adapters, "get_settings",
+        lambda: SimpleNamespace(whatsapp_access_token="", whatsapp_phone_number_id=""),
+    )
+    result = adapters.WhatsAppAdapter().send(_alert(), _sub(channel="whatsapp", address="+91999"))
+    assert result.status == "skipped"
+
+
+def test_whatsapp_adapter_posts_expected_payload(monkeypatch):
+    captured = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured.update(url=url, headers=headers, json=json)
+        return _OKResponse()
+
+    monkeypatch.setattr(adapters.httpx, "post", fake_post)
+    monkeypatch.setattr(
+        adapters, "get_settings",
+        lambda: SimpleNamespace(
+            whatsapp_access_token="tok", whatsapp_phone_number_id="123", whatsapp_api_version="v20.0",
+        ),
+    )
+    result = adapters.WhatsAppAdapter().send(_alert(), _sub(channel="whatsapp", address="+91999"))
+    assert result.status == "sent"
+    assert "123" in captured["url"]
+    assert captured["headers"]["Authorization"] == "Bearer tok"
+    assert captured["json"]["to"] == "+91999"
+
+
+def test_whatsapp_adapter_reports_failure_without_raising(monkeypatch):
+    def fake_post(*a, **k):
+        raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(adapters.httpx, "post", fake_post)
+    monkeypatch.setattr(
+        adapters, "get_settings",
+        lambda: SimpleNamespace(whatsapp_access_token="tok", whatsapp_phone_number_id="123", whatsapp_api_version="v20.0"),
+    )
+    result = adapters.WhatsAppAdapter().send(_alert(), _sub(channel="whatsapp", address="+91999"))
+    assert result.status == "failed"
+    assert result.detail
+
+
 # ---------- Adapter factory ----------
 
-def test_get_adapter_dispatches_telegram_and_web_push():
+def test_get_adapter_dispatches_telegram_web_push_and_whatsapp():
     assert isinstance(adapters.get_adapter("telegram"), adapters.TelegramAdapter)
     assert isinstance(adapters.get_adapter("web_push"), adapters.WebPushAdapter)
+    assert isinstance(adapters.get_adapter("whatsapp"), adapters.WhatsAppAdapter)
     assert adapters.get_adapter("carrier_pigeon") is None
 
 

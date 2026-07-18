@@ -139,6 +139,30 @@ class ExotelAdapter:
             return DeliveryResult("failed", str(exc)[:500])
 
 
+class WhatsAppAdapter:
+    def send(self, alert: Alert, subscription: Subscription) -> DeliveryResult:
+        settings = get_settings()
+        if not (settings.whatsapp_access_token and settings.whatsapp_phone_number_id):
+            return DeliveryResult("skipped", "WhatsApp credentials not configured")
+        url = f"https://graph.facebook.com/{settings.whatsapp_api_version}/{settings.whatsapp_phone_number_id}/messages"
+        try:
+            resp = httpx.post(
+                url,
+                headers={"Authorization": f"Bearer {settings.whatsapp_access_token}"},
+                json={
+                    "messaging_product": "whatsapp",
+                    "to": subscription.address,
+                    "type": "text",
+                    "text": {"body": _text_for(alert, subscription)},
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            return DeliveryResult("sent")
+        except Exception as exc:
+            return DeliveryResult("failed", str(exc)[:500])
+
+
 _SMS_ADAPTERS = {"console": ConsoleAdapter, "twilio": TwilioAdapter, "exotel": ExotelAdapter}
 
 
@@ -147,6 +171,8 @@ def get_adapter(channel: str) -> Adapter | None:
         return TelegramAdapter()
     if channel == "web_push":
         return WebPushAdapter()
+    if channel == "whatsapp":
+        return WhatsAppAdapter()
     if channel == "sms":
         return _SMS_ADAPTERS.get(get_settings().sms_provider, ConsoleAdapter)()
     return None
