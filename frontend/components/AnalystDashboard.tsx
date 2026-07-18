@@ -66,6 +66,11 @@ function ConfidenceBars({ report }: { report: any }) {
           </div>
         );
       })}
+      {comp.detail?.hearsay && (
+        <div style={{ fontSize: 12, color: "var(--warning)", marginTop: 6 }}>
+          🗣 reads as a secondhand account (hearsay) — coherence contribution halved
+        </div>
+      )}
       {comp.detail?.corroborating_anomalies?.length > 0 && (
         <div style={{ fontSize: 12, color: "var(--warning)", marginTop: 6 }}>
           ⚠ {comp.detail.corroborating_anomalies.length} corroborating instrument
@@ -127,6 +132,7 @@ export default function AnalystDashboard() {
   );
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [note, setNote] = useState("");
+  const [correctedHazard, setCorrectedHazard] = useState("");
   const [audit, setAudit] = useState<string | null>(null);
 
   const fetcher = (path: string) => getJSON(path, token!);
@@ -156,8 +162,16 @@ export default function AnalystDashboard() {
 
   async function decide(action: "verify" | "reject") {
     if (!selected) return;
-    await postJSON(`/analyst/reports/${selected.id}/${action}`, { note: note || null }, token);
+    await postJSON(
+      `/analyst/reports/${selected.id}/${action}`,
+      {
+        note: note || null,
+        corrected_hazard_type: action === "reject" ? correctedHazard || null : null,
+      },
+      token
+    );
     setNote("");
+    setCorrectedHazard("");
     refreshReports();
     refreshIncidents();
   }
@@ -341,6 +355,21 @@ export default function AnalystDashboard() {
                     placeholder="e.g. matches tide gauge anomaly + 5 independent reports"
                   />
                 </label>
+                <label className="field">
+                  <span>Wrong hazard type? Which? (only used if you reject)</span>
+                  <select
+                    value={correctedHazard}
+                    onChange={(e) => setCorrectedHazard(e.target.value)}
+                    style={{ width: "100%" }}
+                  >
+                    <option value="">— not a misclassification —</option>
+                    {Object.entries(HAZARD_LABELS)
+                      .filter(([key]) => key !== selected.hazard_type)
+                      .map(([key, label]) => (
+                        <option key={key} value={key}>{label}</option>
+                      ))}
+                  </select>
+                </label>
                 <div style={{ display: "flex", gap: 8 }}>
                   <button className="good" style={{ flex: 1 }} onClick={() => decide("verify")}>
                     ✓ Verify
@@ -352,7 +381,10 @@ export default function AnalystDashboard() {
                 <p style={{ fontSize: 12, color: "var(--muted)" }}>
                   Verifying publishes this report to the public map and raises the
                   reporter's trust; rejecting lowers it. Both are recorded in the
-                  hash-chained audit log.
+                  hash-chained audit log. If the report was rejected because the
+                  hazard type was wrong (not because it wasn't credible), picking
+                  the correct type above turns it into a labeled training example
+                  instead of just a negative signal.
                 </p>
               </div>
             )}

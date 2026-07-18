@@ -31,8 +31,14 @@ class _FakeDb:
         pass
 
 
-def _example(text, hazard_type="coastal_flooding", outcome="verify"):
-    return TrainingExample(text=text, lang="en", hazard_type=hazard_type, outcome=outcome)
+def _example(text, hazard_type="coastal_flooding", outcome="verify", corrected_hazard_type=None):
+    return TrainingExample(
+        text=text,
+        lang="en",
+        hazard_type=hazard_type,
+        outcome=outcome,
+        corrected_hazard_type=corrected_hazard_type,
+    )
 
 
 def test_export_examples_drops_blank_text():
@@ -45,6 +51,22 @@ def test_export_examples_drops_blank_text():
 def test_export_examples_preserves_hazard_type_per_row():
     db = _FakeDb([_example("oil everywhere", hazard_type="oil_spill")])
     assert retrain.export_examples(db) == [{"text": "oil everywhere", "hazard_type": "oil_spill"}]
+
+
+def test_export_examples_uses_corrected_hazard_type_when_present():
+    # Rejected because the hazard type was wrong, not because it wasn't credible —
+    # the analyst's correction should stand in for the original (mis)classification.
+    db = _FakeDb([
+        _example(
+            "green water and dead fish smell",
+            hazard_type="oil_spill",
+            outcome="reject",
+            corrected_hazard_type="algal_bloom",
+        )
+    ])
+    assert retrain.export_examples(db) == [
+        {"text": "green water and dead fish smell", "hazard_type": "algal_bloom"}
+    ]
 
 
 def test_main_returns_1_when_not_enough_data(monkeypatch):

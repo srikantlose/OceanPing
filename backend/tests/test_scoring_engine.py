@@ -15,6 +15,16 @@ def test_coherence_curve():
     assert engine.coherence_score(10) == 1.0
 
 
+def test_coherence_hearsay_discount():
+    # A secondhand account's coherence contribution is halved...
+    assert engine.coherence_score(4, hearsay=True) == approx(0.5)
+    assert engine.coherence_score(1, hearsay=True) == approx(0.2)
+    # ...but zero independent corroboration stays zero either way.
+    assert engine.coherence_score(0, hearsay=True) == 0.0
+    # and non-hearsay reports are unaffected by the flag at all.
+    assert engine.coherence_score(4, hearsay=False) == engine.coherence_score(4)
+
+
 def test_instrument_mapping():
     assert engine.instrument_score([]) == 0.0
     assert engine.instrument_score([1.0]) == 0.0          # below anomaly floor

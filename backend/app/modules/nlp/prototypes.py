@@ -85,3 +85,11 @@ URGENCY_HIGH = [
     "kaapathunga", "udhavi", "bachao", "madad",
 ]
 URGENCY_LOW = ["yesterday", "last week", "slowly", "small", "minor", "कल", "धीरे", "நேற்று", "மெதுவாக"]
+
+# Secondhand-account markers (reported speech, not a firsthand observation).
+HEARSAY_MARKERS = [
+    "i heard", "someone said", "someone told me", "people are saying", "apparently",
+    "according to", "they say", "rumor", "rumour", "heard that", "my friend said",
+    "सुना है", "लोग कह रहे हैं", "कहा जा रहा है", "किसी ने बताया",
+    "கேள்விப்பட்டேன்", "சொல்கிறார்கள்", "நண்பர் சொன்னார்", "கேள்விப்பட்டது",
+]

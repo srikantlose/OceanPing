@@ -15,7 +15,13 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from app.core.config import get_settings
-from app.modules.nlp.prototypes import KEYWORDS, PROTOTYPES, URGENCY_HIGH, URGENCY_LOW
+from app.modules.nlp.prototypes import (
+    HEARSAY_MARKERS,
+    KEYWORDS,
+    PROTOTYPES,
+    URGENCY_HIGH,
+    URGENCY_LOW,
+)
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +62,18 @@ def detect_urgency(text: str | None, default: str = "medium") -> str:
     if any(k in lower for k in URGENCY_LOW):
         return "low"
     return default
+
+
+def detect_hearsay(text: str | None) -> bool:
+    """True if the text reads as a secondhand account (rumor/hearsay) rather than a
+    firsthand observation. Keyword heuristic, same shape as detect_urgency() above —
+    a trainable hearsay head needs labeled first-person/hearsay examples we don't have
+    yet, the same honest-scoping call train_classifier.py's linear probe already makes
+    in place of a full MuRIL fine-tune."""
+    if not text:
+        return False
+    lower = text.lower()
+    return any(k in lower for k in HEARSAY_MARKERS)
 
 
 def _load_model():

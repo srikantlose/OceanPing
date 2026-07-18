@@ -9,8 +9,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.models import Report, Reporter, Station, StationAnomaly, TrainingExample, Verification
+from app.models import HAZARD_TYPES, Report, Reporter, Station, StationAnomaly, TrainingExample, Verification
 from app.modules.alerts.service import sync_incident_alert
+from app.modules.nlp import classifier
 from app.modules.scoring import engine
 from app.modules.scoring.audit import append_audit
 
@@ -80,16 +81,18 @@ def rescore_report(db: Session, report: Report) -> float:
     settings = get_settings()
     n_independent = _coherence_count(db, report)
     anomalies = _instrument_zscores(db, report)
+    hearsay = classifier.detect_hearsay(report.text)
     prev = report.confidence_components or {}
     components = {
         "trust": round(report.reporter.trust_score, 4),
-        "coherence": engine.coherence_score(n_independent),
+        "coherence": engine.coherence_score(n_independent, hearsay=hearsay),
         "instrument": engine.instrument_score([a["zscore"] for a in anomalies]),
         "media": prev.get("media", engine.MEDIA_NEUTRAL),
     }
     detail = {
         "n_independent_reports": n_independent,
         "corroborating_anomalies": anomalies,
+        "hearsay": hearsay,
         # forensics are computed once at ingest; carry them across rescores
         "media_forensics": prev.get("media_forensics") or (prev.get("detail") or {}).get("media_forensics"),
     }
@@ -151,11 +154,23 @@ def rescore_recent(db: Session) -> int:
 
 
 def apply_verification(
-    db: Session, report: Report, analyst: str, action: str, note: str | None = None
+    db: Session,
+    report: Report,
+    analyst: str,
+    action: str,
+    note: str | None = None,
+    corrected_hazard_type: str | None = None,
 ) -> Report:
-    """Analyst decision: the only path to 'verified'. Runs the trust ladder."""
+    """Analyst decision: the only path to 'verified'. Runs the trust ladder.
+
+    corrected_hazard_type is the reject-flow's "wrong hazard type? which?" answer:
+    the report itself still ends up rejected (it doesn't get published either way),
+    but this makes the training_examples row a usable corrected label instead of a
+    bare negative — see retrain.py::export_examples()."""
     if action not in ("verify", "reject"):
         raise ValueError(f"Unknown verification action: {action}")
+    if corrected_hazard_type is not None and corrected_hazard_type not in HAZARD_TYPES:
+        raise ValueError(f"Unknown hazard type: {corrected_hazard_type}")
     old_status = report.status
     reporter: Reporter = report.reporter
     if action == "verify":
@@ -182,6 +197,7 @@ def apply_verification(
             lang=report.lang,
             hazard_type=report.hazard_type,
             outcome=action,
+            corrected_hazard_type=corrected_hazard_type,
         )
     )
     append_audit(
@@ -195,6 +211,7 @@ def apply_verification(
             "analyst": analyst,
             "action": action,
             "note": note,
+            "corrected_hazard_type": corrected_hazard_type,
             "reporter_trust_after": round(reporter.trust_score, 4),
         },
     )

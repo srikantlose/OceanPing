@@ -75,6 +75,9 @@ def list_reports(
 
 class DecisionIn(BaseModel):
     note: str | None = None
+    # Reject-flow only: "wrong hazard type? which?" — lets a rejection still
+    # contribute a corrected training label instead of just a negative signal.
+    corrected_hazard_type: str | None = None
 
 
 @router.post("/analyst/reports/{report_id}/verify")
@@ -103,7 +106,17 @@ def _decide(report_id: uuid.UUID, action: str, body: DecisionIn, analyst: str, d
         raise HTTPException(status_code=404, detail="Report not found")
     if report.status in ("verified", "rejected"):
         raise HTTPException(status_code=409, detail=f"Report already {report.status}")
-    apply_verification(db, report, analyst=analyst, action=action, note=body.note)
+    try:
+        apply_verification(
+            db,
+            report,
+            analyst=analyst,
+            action=action,
+            note=body.note,
+            corrected_hazard_type=body.corrected_hazard_type,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     return _report_detail(report)
 
 

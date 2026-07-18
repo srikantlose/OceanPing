@@ -237,6 +237,9 @@ class TrainingExample(Base):
     lang: Mapped[str] = mapped_column(String(8), default="und")
     hazard_type: Mapped[str] = mapped_column(String(32))
     outcome: Mapped[str] = mapped_column(String(16))  # verify | reject
+    # Set only when an analyst rejects a report but flags the *hazard type* (not the
+    # report itself) as wrong — makes the row a usable label even though outcome=reject.
+    corrected_hazard_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 

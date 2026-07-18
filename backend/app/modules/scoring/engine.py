@@ -28,13 +28,17 @@ HAZARD_VARIABLES: dict[str, set[str]] = {
 }
 
 MEDIA_NEUTRAL = 0.5  # score for reports without any media attached
+HEARSAY_DISCOUNT = 0.5  # a secondhand account counts for half its coherence contribution
 
 
-def coherence_score(n_independent: int) -> float:
-    """0 with no independent corroboration; saturates at 4+ nearby reporters."""
+def coherence_score(n_independent: int, hearsay: bool = False) -> float:
+    """0 with no independent corroboration; saturates at 4+ nearby reporters.
+    A hearsay report (secondhand account, not a firsthand observation) has this
+    halved — it isn't independent corroboration in the same sense."""
     if n_independent <= 0:
         return 0.0
-    return min(1.0, 0.4 + 0.2 * (n_independent - 1))
+    score = min(1.0, 0.4 + 0.2 * (n_independent - 1))
+    return score * HEARSAY_DISCOUNT if hearsay else score
 
 
 def instrument_score(zscores: list[float]) -> float:

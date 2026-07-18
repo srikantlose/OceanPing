@@ -1,4 +1,4 @@
-from app.modules.nlp.classifier import _classify_keywords, detect_urgency
+from app.modules.nlp.classifier import _classify_keywords, detect_hearsay, detect_urgency
 
 
 def test_keyword_classification_english():
@@ -21,3 +21,12 @@ def test_urgency_detection():
     assert detect_urgency("minor erosion I noticed yesterday") == "low"
     assert detect_urgency("water on the road") == "medium"
     assert detect_urgency(None) == "medium"
+
+
+def test_hearsay_detection():
+    assert detect_hearsay("I heard the road near the beach is flooded") is True
+    assert detect_hearsay("someone told me there's an oil spill near the harbour") is True
+    assert detect_hearsay("सुना है गांव में पानी भर गया है") is True
+    assert detect_hearsay("the water is up to my knees right now") is False
+    assert detect_hearsay(None) is False
+    assert detect_hearsay("") is False

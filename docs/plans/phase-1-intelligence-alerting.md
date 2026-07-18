@@ -1,6 +1,6 @@
 # Phase 1 — Intelligence Core & Tiered Alerting (blueprint weeks 7–14, gap plan)
 
-**Status: 🟡 in progress — Milestones 1–4 built (July 2026).** Prereq: phase 0 (built).
+**Status: ✅ all 5 milestones built (July 2026).** Prereq: phase 0 (built).
 Everything here stays inside the monolith.
 
 ## Milestone 1 — as built
@@ -173,6 +173,74 @@ milestone 5's correction UI, so rejected reports are recorded (`outcome="reject"
 type, just that the report wasn't credible, so using them as training labels needs the
 "wrong hazard? which?" correction prompt milestone 5 adds.
 
+## Milestone 5 — as built
+
+The hearsay signal and reject-correction UI are live, closing the loop the plan called
+for without needing a real MuRIL fine-tune (same honest scoping as Milestone 4):
+
+- `backend/app/modules/nlp/prototypes.py` — `HEARSAY_MARKERS`: secondhand-account phrases
+  ("i heard", "someone told me", "apparently", "सुना है", "கேள்விப்பட்டேன்", etc.) in
+  English/Hindi/Tamil, same shape as the existing `URGENCY_HIGH`/`URGENCY_LOW` lists.
+- `backend/app/modules/nlp/classifier.py` — `detect_hearsay(text) -> bool`, a keyword
+  heuristic mirroring `detect_urgency()` exactly. The plan's original wording ("same
+  fine-tune run, second head/label") assumed a trainable transformer fine-tune; since
+  Milestone 4 scoped that down to a linear probe with no hearsay-labeled data to train
+  on, a heuristic is the honest equivalent here too — swapping in a trained head later
+  is a `classifier.py` change, not a caller-facing one, same seam as everywhere else in
+  this module.
+- `backend/app/modules/scoring/engine.py` — `coherence_score()` gained an optional
+  `hearsay: bool = False` parameter (backward compatible: existing single-arg calls and
+  tests are untouched). A hearsay report's coherence contribution is halved
+  (`HEARSAY_DISCOUNT = 0.5`) — it isn't independent firsthand corroboration. `WEIGHTS`
+  itself is unchanged, per the plan.
+- `backend/app/modules/scoring/service.py::rescore_report()` — calls
+  `classifier.detect_hearsay(report.text)` on every rescore (cheap, deterministic from
+  text alone, so it's recomputed rather than cached/carried like media forensics) and
+  passes it into `coherence_score()`. The flag itself is stored in
+  `confidence_components.detail.hearsay` for the dashboard and for debugging.
+- `backend/app/modules/scoring/service.py::apply_verification()` — new optional
+  `corrected_hazard_type` parameter, validated against `HAZARD_TYPES` (raises
+  `ValueError` → the router turns that into a 422). The report's own `hazard_type` and
+  `status` are untouched by a correction — a rejected report stays rejected either way —
+  but the `TrainingExample` row now also carries `corrected_hazard_type`.
+- `backend/app/models.py` / `backend/alembic/versions/0005_hearsay_correction.py` —
+  `TrainingExample.corrected_hazard_type` (nullable `String(32)`), added via
+  `op.add_column` (this alters the existing table from `0004`, so it follows `0003`'s
+  hand-written-migration convention rather than `0004`'s `create_all` one).
+- `backend/training/retrain.py::export_examples()` — now exports rows where
+  `outcome == "verify"` **or** `corrected_hazard_type is not None`, using
+  `corrected_hazard_type or hazard_type` as the label. A plain reject (no correction)
+  still contributes nothing to training, per the original design note — only a
+  corrected reject becomes a usable label.
+- `backend/app/modules/analyst/router.py` — `DecisionIn` gained `corrected_hazard_type`;
+  `_decide()` passes it through and turns a validation `ValueError` into an HTTP 422.
+- `frontend/components/AnalystDashboard.tsx` — a "Wrong hazard type? Which?" dropdown
+  (populated from `HAZARD_LABELS`, excluding the report's current type) sits above the
+  Verify/Reject buttons; it's only sent along on reject. `ConfidenceBars` also surfaces
+  a "reads as a secondhand account" note when `detail.hearsay` is true.
+- Tests: `test_scoring_engine.py::test_coherence_hearsay_discount`,
+  `test_nlp_fallback.py::test_hearsay_detection`,
+  `test_retrain.py::test_export_examples_uses_corrected_hazard_type_when_present`,
+  `test_scoring_service.py` (new file — `apply_verification`'s validation errors,
+  the first direct unit tests that file has had; everything else about it is still
+  only exercised live via `scripts/drill.py`, per this suite's no-real-DB convention).
+
+**Verified live, not just under mocks:** rebuilt both the backend and frontend images
+(both use build-time `COPY`, so host edits need a rebuild to reach the containers) and
+ran `scripts/drill.py` clean end-to-end with no regressions. Beyond the drill, submitted
+a real report with hearsay wording through the public API and confirmed via `psql` that
+`confidence_components` showed `hearsay: true` and `coherence: 0.5` where an identical
+non-hearsay report would have scored `1.0` (5 independent nearby reports). Separately,
+rejected a real drill-generated report through the analyst API with
+`corrected_hazard_type=high_waves` (its original guess was `storm_surge`), confirmed the
+`training_examples` row recorded both the original and corrected type, and confirmed
+`training.retrain.export_examples()` returned that row labeled `high_waves`. Also
+confirmed an invalid `corrected_hazard_type` returns HTTP 422 without mutating the
+report. The frontend change was verified by a clean `next build` (type-checks the TSX)
+and the API contract it calls being proven correct above; there was no browser-automation
+tool available in this session to click through the dropdown itself, so that specific
+interaction is unverified — worth a manual pass before relying on it in a demo.
+
 ## Remaining milestones (unchanged from original plan below)
 
 ## Goals
@@ -274,12 +342,13 @@ Compose service `worker` (same backend image). Optional: `faster-whisper` model 
 3. ✅ Whisper voice reports through the bot
 4. ✅ Training export + retrain script + linear-probe swap behind `classify()` (full
    MuRIL/IndicBERT fine-tune deferred until labeled volume clears the ~500-row threshold)
-5. Hearsay signal into scoring + correction UI
+5. ✅ Hearsay signal into scoring + correction UI (keyword heuristic, not a trainable
+   head — no labeled hearsay data exists to train one; same scoping call as milestone 4)
 
 ## Verification
 
 - Unit: tier-eligibility function (auto-warning impossible), delivery adapter contract,
-  hearsay multiplier math.
+  ✅ hearsay multiplier math (`test_coherence_hearsay_discount`).
 - E2E: extend `scripts/drill.py` — after corroboration, issue a watch alert as analyst,
   assert a subscribed drill Telegram chat (or ConsoleAdapter log) received it and
   `alert_deliveries` + audit chain record it.
@@ -287,3 +356,6 @@ Compose service `worker` (same backend image). Optional: `faster-whisper` model 
 - ✅ Retrain dry-run: `python -m training.retrain --dry-run` (inside the backend container)
   produces a metrics report — verified both the "not enough data" and real-metrics cases
   against the live stack.
+- ✅ Hearsay + correction UI: verified live against the running stack (see milestone 5's
+  "as built" section) — a hearsay-worded report scored half coherence, and a corrected
+  rejection surfaced through `retrain.py`'s export with the corrected label.

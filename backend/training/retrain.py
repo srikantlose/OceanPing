@@ -17,7 +17,7 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.core.config import get_settings
 from app.core.db import SessionLocal
@@ -28,14 +28,21 @@ log = logging.getLogger(__name__)
 
 
 def export_examples(db) -> list[dict]:
-    """Verified rows only — a reject doesn't tell us the *correct* hazard type,
-    just that the report wasn't credible (milestone 5's correction UI is what
-    turns rejections into usable negative/corrected labels)."""
+    """Verified rows, plus corrected rejections: a plain reject doesn't tell us the
+    *correct* hazard type, just that the report wasn't credible, but the analyst
+    dashboard's "wrong hazard type? which?" prompt (milestone 5) can attach a
+    corrected_hazard_type to a rejected row — that's a usable label too, so it's
+    trained on with the corrected type standing in for the original guess."""
     rows = db.scalars(
-        select(TrainingExample).where(TrainingExample.outcome == "verify")
+        select(TrainingExample).where(
+            or_(
+                TrainingExample.outcome == "verify",
+                TrainingExample.corrected_hazard_type.is_not(None),
+            )
+        )
     ).all()
     return [
-        {"text": r.text, "hazard_type": r.hazard_type}
+        {"text": r.text, "hazard_type": r.corrected_hazard_type or r.hazard_type}
         for r in rows
         if r.text and r.text.strip()
     ]
