@@ -15,6 +15,7 @@ from app.modules.fisherman.router import router as fisherman_router
 from app.modules.geo.router import router as geo_router
 from app.modules.ingest.router import router as ingest_router
 from app.modules.ivr.router import router as ivr_router
+from app.modules.routing.router import router as routing_router
 from app.modules.whatsapp.router import router as whatsapp_router
 
 logging.basicConfig(level=logging.INFO)
@@ -24,6 +25,7 @@ log = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from app.modules.chat.corpus import seed_corpus
+    from app.modules.routing.seed import seed_shelters
     from app.modules.sensors.service import sync_stations
 
     db = SessionLocal()
@@ -40,6 +42,15 @@ async def lifespan(app: FastAPI):
         seed_corpus(db)
     except Exception:
         log.exception("Chat corpus seed failed at startup")
+        db.rollback()
+    finally:
+        db.close()
+
+    db = SessionLocal()
+    try:
+        seed_shelters(db)
+    except Exception:
+        log.exception("Shelter seed failed at startup")
         db.rollback()
     finally:
         db.close()
@@ -69,6 +80,7 @@ app.include_router(chat_router)
 app.include_router(whatsapp_router)
 app.include_router(ivr_router)
 app.include_router(fisherman_router)
+app.include_router(routing_router)
 
 
 @app.get("/healthz")

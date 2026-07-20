@@ -2,7 +2,6 @@
 plus "give before ask" surfaces (PFZ zones, nearby sea-state) a fisherman can
 check any time, not just while filing a report."""
 import logging
-import math
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -12,6 +11,7 @@ from app.core.config import get_settings
 from app.models import PfzAdvisory, SensorReading, Station, StationAnomaly
 from app.modules.fisherman import pfz as pfz_mod
 from app.modules.fisherman import roster
+from app.modules.geo.distance import haversine_km
 from app.modules.ingest.service import FISHERMAN_START_TRUST, get_or_create_reporter
 
 log = logging.getLogger(__name__)
@@ -93,20 +93,11 @@ def active_pfz_advisories(db: Session, sector: str = pfz_mod.PILOT_SECTOR) -> li
     ]
 
 
-def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    radius_km = 6371.0
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
-    return 2 * radius_km * math.asin(math.sqrt(a))
-
-
 def _nearest_station(db: Session, ref_lat: float, ref_lon: float) -> Station | None:
     stations = db.scalars(select(Station)).all()
     if not stations:
         return None
-    return min(stations, key=lambda st: _haversine_km(ref_lat, ref_lon, st.lat, st.lon))
+    return min(stations, key=lambda st: haversine_km(ref_lat, ref_lon, st.lat, st.lon))
 
 
 def _station_sensor_summary(db: Session, station_id: str) -> dict:
@@ -144,7 +135,7 @@ def nearest_station_reading(db: Session, lat: float | None = None, lon: float | 
     nearest = _nearest_station(db, ref_lat, ref_lon)
     if nearest is None:
         return None
-    distance_km = round(_haversine_km(ref_lat, ref_lon, nearest.lat, nearest.lon), 1)
+    distance_km = round(haversine_km(ref_lat, ref_lon, nearest.lat, nearest.lon), 1)
     return {
         "station_id": nearest.id,
         "station_name": nearest.name,

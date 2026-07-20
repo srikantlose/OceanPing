@@ -45,6 +45,7 @@ services:
       WHATSAPP_APP_SECRET: ${WHATSAPP_APP_SECRET:-}
       TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
       TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      VALHALLA_URL: ${VALHALLA_URL:-http://valhalla:8002}
     ports:
       - "8000:8000"
     volumes:
@@ -57,6 +58,20 @@ services:
       redis:
         condition: service_healthy
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+  # Evacuation routing (phase 2, milestone 6). Real Valhalla, not a stub —
+  # see docker/valhalla/ and scripts/routing/fetch_osm_extract.sh, which
+  # downloads + clips an OSM extract to this deployment's pilot district
+  # (Chennai) before this container has anything to build tiles from. First
+  # start after that script runs takes a little longer (one-time tile
+  # build, persisted in valhalla_tiles); every start after that is instant.
+  valhalla:
+    build: ./docker/valhalla
+    volumes:
+      - valhalla_tiles:/data/valhalla
+      - ./data/osm:/data/osm:ro
+    ports:
+      - "8002:8002"
 
   worker:
     build: ./backend
@@ -122,3 +137,4 @@ volumes:
   media:
   hfcache:
   models:
+  valhalla_tiles:

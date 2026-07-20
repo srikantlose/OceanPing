@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, getJSON } from "@/lib/api";
 import {
   ALERT_TIER_COLORS,
   ALERT_TIER_LABELS,
@@ -61,6 +61,72 @@ export default function MapView() {
   const mapRef = useRef<maplibregl.Map | null>(null);
   const [subStatus, setSubStatus] = useState<"idle" | "pending" | "done" | "error">("idle");
   const [subError, setSubError] = useState<string | null>(null);
+  const [routeStatus, setRouteStatus] = useState<"idle" | "pending" | "done" | "error">("idle");
+  const [routeError, setRouteError] = useState<string | null>(null);
+  const [routeResult, setRouteResult] = useState<{
+    shelter: { name: string; capacity: number | null } | null;
+    distance_km: number;
+    duration_min: number;
+    avoided_hazards: boolean;
+  } | null>(null);
+
+  const handleRouteToSafety = () => {
+    if (!mapRef.current) return;
+    setRouteStatus("pending");
+    setRouteError(null);
+    setRouteResult(null);
+
+    const runRoute = async (lat: number, lon: number) => {
+      try {
+        const res = await getJSON(`/route?lat=${lat}&lon=${lon}`);
+        if (!res.shelter || !res.route) {
+          setRouteStatus("error");
+          setRouteError("No open shelter is configured for this area yet.");
+          return;
+        }
+        const map = mapRef.current!;
+        (map.getSource("route") as any)?.setData({
+          type: "FeatureCollection",
+          features: [res.route],
+        });
+        const coords = res.route.geometry.coordinates as [number, number][];
+        const bounds = coords.reduce(
+          (b, c) => b.extend(c),
+          new maplibregl.LngLatBounds(coords[0], coords[0])
+        );
+        map.fitBounds(bounds, { padding: 60, maxZoom: 15 });
+        setRouteResult({
+          shelter: res.shelter,
+          distance_km: res.route.properties.distance_km,
+          duration_min: res.route.properties.duration_min,
+          avoided_hazards: res.avoided_hazards,
+        });
+        setRouteStatus("done");
+      } catch (err: any) {
+        setRouteStatus("error");
+        const msg = String(err?.message || "");
+        setRouteError(
+          msg.startsWith("503")
+            ? "Routing engine isn't ready yet (tiles may still be building)."
+            : "Could not compute a route."
+        );
+      }
+    };
+
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => runRoute(pos.coords.latitude, pos.coords.longitude),
+        () => {
+          const center = mapRef.current!.getCenter();
+          runRoute(center.lat, center.lng);
+        },
+        { timeout: 5000 }
+      );
+    } else {
+      const center = mapRef.current.getCenter();
+      runRoute(center.lat, center.lng);
+    }
+  };
 
   const handleSubscribe = async () => {
     if (!mapRef.current) return;
@@ -88,7 +154,7 @@ export default function MapView() {
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
 
     map.on("load", () => {
-      for (const id of ["hotspots", "alerts", "incident-cells", "incidents", "reports", "stations"]) {
+      for (const id of ["hotspots", "alerts", "incident-cells", "incidents", "reports", "stations", "shelters", "route"]) {
         map.addSource(id, { type: "geojson", data: EMPTY_FC as any });
       }
 
@@ -195,13 +261,45 @@ export default function MapView() {
         paint: { "text-color": INK.surface },
       });
 
+      map.addLayer({
+        id: "shelters-circle",
+        type: "circle",
+        source: "shelters",
+        paint: {
+          "circle-color": ["case", ["==", ["get", "status"], "open"], "#0ca30c", INK.muted],
+          "circle-radius": 7,
+          "circle-stroke-width": 2,
+          "circle-stroke-color": INK.surface,
+        },
+      });
+      map.addLayer({
+        id: "shelters-icon",
+        type: "symbol",
+        source: "shelters",
+        layout: {
+          "text-field": "⛑",
+          "text-size": 9,
+          "text-font": ["Noto Sans Regular"],
+          "text-allow-overlap": true,
+        },
+        paint: { "text-color": INK.surface },
+      });
+
+      map.addLayer({
+        id: "route-line",
+        type: "line",
+        source: "route",
+        paint: { "line-color": "#0ca30c", "line-width": 4, "line-dasharray": [1, 0] },
+      });
+
       const refresh = async () => {
-        const [hotspots, alerts, incidents, reports, stations] = await Promise.all([
+        const [hotspots, alerts, incidents, reports, stations, shelters] = await Promise.all([
           fetchFC("/map/hotspots"),
           fetchFC("/map/alerts"),
           fetchFC("/map/incidents"),
           fetchFC("/map/reports"),
           fetchFC("/map/stations"),
+          fetchFC("/map/shelters"),
         ]);
         const cells = {
           type: "FeatureCollection",
@@ -221,6 +319,7 @@ export default function MapView() {
         (map.getSource("incidents") as any)?.setData(incidents);
         (map.getSource("reports") as any)?.setData(reports);
         (map.getSource("stations") as any)?.setData(stations);
+        (map.getSource("shelters") as any)?.setData(shelters);
       };
       refresh();
       const timer = setInterval(refresh, REFRESH_MS);
@@ -291,7 +390,18 @@ export default function MapView() {
         );
       });
 
-      for (const layer of ["stations-circles", "incidents-circles", "reports-circles", "alerts-fill"]) {
+      map.on("click", "shelters-circle", (e) => {
+        const p: any = e.features?.[0]?.properties;
+        if (!p) return;
+        popup(
+          e.lngLat,
+          `<div class="popup-title">${p.name}</div>
+           <div class="popup-sub">${p.status === "open" ? "Open" : p.status}${p.capacity ? ` · capacity ${p.capacity}` : ""}</div>
+           ${p.address ? `<div style="font-size:12px">${p.address}</div>` : ""}`
+        );
+      });
+
+      for (const layer of ["stations-circles", "incidents-circles", "reports-circles", "alerts-fill", "shelters-circle"]) {
         map.on("mouseenter", layer, () => (map.getCanvas().style.cursor = "pointer"));
         map.on("mouseleave", layer, () => (map.getCanvas().style.cursor = ""));
       }
@@ -338,6 +448,38 @@ export default function MapView() {
           <span className="legend-swatch" style={{ background: STATUS_COLORS.verified }} />
           Verified only on this map
         </div>
+        <div className="legend-row">
+          <span className="legend-swatch" style={{ background: "#0ca30c" }} />
+          Shelter / route
+        </div>
+
+        <h4 style={{ marginTop: 8 }}>Route to safety</h4>
+        <button
+          className="primary"
+          style={{ width: "100%", fontSize: 12 }}
+          onClick={handleRouteToSafety}
+          disabled={routeStatus === "pending"}
+        >
+          {routeStatus === "pending" ? "Finding a route…" : "🧭 Route to nearest shelter"}
+        </button>
+        {routeStatus === "error" && (
+          <div className="spark-caption" style={{ color: INK.critical }}>
+            {routeError}
+          </div>
+        )}
+        {routeStatus === "done" && routeResult && (
+          <>
+            <div className="spark-caption">
+              → {routeResult.shelter?.name}: {routeResult.distance_km} km, ~{routeResult.duration_min} min
+            </div>
+            {!routeResult.avoided_hazards && (
+              <div className="notice err" style={{ fontSize: 11 }}>
+                Active hazard zones near the start point could not be fully avoided.
+              </div>
+            )}
+          </>
+        )}
+
         {browserAlertsSupported() && (
           <>
             <h4 style={{ marginTop: 8 }}>Browser alerts</h4>

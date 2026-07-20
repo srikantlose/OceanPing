@@ -1,11 +1,12 @@
 # Phase 2 — Fusion & Reach (blueprint weeks 15–24, gap plan)
 
-**Status: 🟡 in progress (July 2026).** Milestones 2 (satellite + six-signal rebalance),
-3 (RAG chatbot), 4 (channel-agnostic conversation core + WhatsApp + IVR), and 5
-(fisherman mode: roles, PFZ/sea-state surfaces, Tamil/Telugu localization) built.
-Milestone 1 (INCOIS real datasets) investigated and found blocked on external data
-availability — see below — deferred rather than faked. Prereqs: phase 0 (built); phase 1
-delivery worker for new channels.
+**Status: ✅ effectively complete (July 2026).** Milestones 2 (satellite + six-signal
+rebalance), 3 (RAG chatbot), 4 (channel-agnostic conversation core + WhatsApp + IVR), 5
+(fisherman mode: roles, PFZ/sea-state surfaces, Tamil/Telugu localization), and 6
+(Valhalla evacuation routing + shelters + public map routing UI) built. Milestone 1
+(INCOIS real datasets) investigated and found blocked on external data availability —
+see below — deferred rather than faked. Prereqs: phase 0 (built); phase 1 delivery
+worker for new channels.
 **Independent items** (can land before phase 1 completes): satellite corroboration, INCOIS
 dataset IDs, station config → DB, RAG chatbot.
 
@@ -445,6 +446,172 @@ exceptions.
 - A native-speaker review pass on the Tamil/Telugu strings (see the localization section
   above) — flagged in-code, not silently shipped as verified-correct.
 
+## Milestone 6 — as built
+
+Evacuation routing is live — and unlike every other external integration in this
+project, it's the **real thing running**, not a stub: a real Valhalla routing engine
+over a real (if pilot-scoped) OpenStreetMap extract, computing real turn-by-turn paths
+around real hazard geometry.
+
+- **Why real, not a stub**: investigated feasibility before assuming a `StubProvider`
+  was the only option this environment could support (same rigor as every other "should
+  this be real or stubbed" call in this project) — Docker, outbound internet, and disk
+  space were all available, so a self-hosted Valhalla instance was actually buildable and
+  testable here, unlike Sentinel Hub/Earth Engine/a real Meta WhatsApp account/Twilio
+  (credentialed third-party services this environment has no account for). No credential
+  gate exists for it, because there isn't one to gate — the gate is reachability instead
+  (`routing/client.py::RoutingUnavailable`).
+- **OSM extract, scoped to the pilot district**: `scripts/routing/fetch_osm_extract.sh`
+  downloads Geofabrik's southern-India zone extract (~550 MB — India has no state-level
+  split on Geofabrik, only zone-level) once, then clips it with `osmium-tool` (run in a
+  throwaway `ubuntu:22.04` container so nothing long-lived needs that dependency) to a
+  bounding box around Chennai + this project's existing pilot coastal neighborhoods
+  (Ennore, Kasimedu, Marina Beach, Besant Nagar, Injambakkam — the same points
+  `fisherman/pfz.py` and `ivr/locations.py` already use), producing a ~22 MB
+  `data/osm/chennai-pilot.osm.pbf`. `data/` is gitignored; this script is the
+  reproducible, scripted step the phase-2 plan calls for, matching the "pilot districts,
+  not all-India" risk note.
+- **`docker/valhalla/`** — a thin wrapper around the official `ghcr.io/valhalla/valhalla`
+  image: `entrypoint.sh` builds routing tiles from the pilot extract on first start
+  (persisted in the `valhalla_tiles` volume, so restarts don't rebuild — same pattern as
+  `hfcache`/`models` for the embedding/Whisper models), skipping admin/timezone databases
+  (they only feed turn narrative text and DST-aware ETAs, not the route geometry or
+  `exclude_polygons` this app actually uses, and building them needs extra downloads this
+  pilot scope doesn't need). Regenerates `valhalla.json` on every start (cheap) so a
+  config change never needs the tile volume wiped.
+- **`backend/app/models.py`** — `Shelter` (name, lat/lon/geom, capacity, status
+  open/full/closed, address). Migration `0009_routing.py` (follows the `0006`–`0008`
+  `create_all` pattern).
+- **`backend/app/modules/routing/`** (new):
+  - `client.py` — `route()`, a plain `httpx` POST to Valhalla's `/route`, raising
+    `RoutingUnavailable` on any failure (connection error, non-2xx, or a 200 with no
+    `trip` in the body — Valhalla returns errors this way too).
+  - `polyline.py` — `decode_polyline6()`, Google's polyline algorithm at Valhalla's 1e6
+    precision. No new dependency; validated against a real Valhalla response captured
+    live (its decoded bounding box matched the response's own `summary.min_lat`/etc. to
+    5 decimal places).
+  - `service.py` — `list_shelters`/`create_shelter`/`update_shelter`/`delete_shelter`;
+    `nearest_open_shelter()` (haversine, reusing the same distance function
+    `fisherman/service.py` used inline — promoted to `geo/distance.py::haversine_km` so
+    both modules share one implementation instead of two copies); `exclude_polygons()`
+    (H3 cell rings for corroborated/verified incidents within
+    `routing_active_incident_hours`, plus active warning-tier alerts — **never raw
+    citizen report volume alone**, the same "no citizen-only escalation" rule
+    `scoring/service.py` and `alerts/service.py` already enforce, since both of those
+    statuses only exist because an instrument, satellite, or analyst already agreed);
+    `route_to_safety()` composes shelter lookup + Valhalla call + polyline decode into
+    one response.
+  - `seed.py` + `shelters_seed.json` — a small hand-picked list of illustrative pilot
+    shelter locations (inland of the coastal points above — a shelter directly on the
+    beach where flood reports concentrate doesn't make sense), explicitly labeled as
+    seed data standing in for a real government shelter registry import, the same
+    honest-stub role `ivr/locations.py` and `fisherman/roster.py` play elsewhere. Unlike
+    `sync_stations()`/`seed_corpus()` (which upsert by id on every startup, since those
+    are reference config), this only seeds once — shelters are analyst-editable, so a
+    restart must never silently overwrite analyst edits back to the seed list.
+  - `router.py` — analyst CRUD (`/analyst/shelters`, same trust boundary as the rest of
+    `/analyst/*`) and public `GET /route?lat=&lon=&costing=` (no auth, same boundary as
+    `/chat` and `/sea/*`).
+- **`backend/app/modules/geo/router.py`** gained public `GET /map/shelters` (same
+  GeoJSON-layer pattern as `/map/stations`).
+- **`backend/app/modules/geo/distance.py`** (new) — `haversine_km()`, promoted out of
+  `fisherman/service.py`'s private `_haversine_km` now that routing needed the same
+  function; `fisherman/service.py` updated to import it instead of keeping its own copy.
+- **`docker-compose.yml`** — new `valhalla` service (`build: ./docker/valhalla`,
+  `valhalla_tiles` volume, `./data/osm` mounted read-only, port 8002) and
+  `VALHALLA_URL` threaded through `backend`.
+- **A real hazard-enclosure edge case, handled rather than left as a hard failure**:
+  Valhalla's `exclude_polygons` is a hard exclusion — if the traveler's own starting
+  point sits inside the excluded hazard geometry (exactly the drill's own flood-zone
+  scenario: reports cluster right at the evacuee's location), there may be no reachable
+  edge to leave on without ever touching an excluded cell, and Valhalla returns "no path
+  could be found" outright. `route_to_safety()` catches that, retries the same request
+  with `exclude_polygons` dropped, and flags the result `avoided_hazards: false` — a
+  route that passes near an active hazard is still far more useful to someone evacuating
+  than no route at all. `MapView.tsx` surfaces this flag as a warning notice rather than
+  silently presenting an unqualified "safe" route.
+- **A real, unrelated migration-chain bug found and fixed**: bringing up a genuinely
+  fresh database (needed to get a clean slate for routing verification, after repeated
+  drill runs had piled up enough overlapping synthetic incidents to trap every route) hit
+  a `DuplicateColumn` error replaying migrations `0001` → `0009` from scratch — the first
+  time this project's full migration chain had ever actually been exercised end to end
+  rather than incrementally applied to an already-migrated dev database. `0002`, `0003`,
+  and `0005` each do an explicit `op.add_column(...)` for a column that a *later-in-that-
+  same-migration* or *earlier* `Base.metadata.create_all()` already creates on a
+  from-scratch database — because `models.py` isn't historically snapshotted per
+  migration, the *current* model (with the column already present) is what `create_all`
+  builds, regardless of which migration triggers it. Fixed by guarding each explicit
+  `add_column` with a `sqlalchemy.inspect` column-existence check, so the migration still
+  does its job for a real pre-existing database that predates the column, without
+  erroring on a fresh one.
+- **A real Valhalla service-limit bug found and fixed**: the default
+  `service_limits.max_exclude_polygons_length` (10,000 m total perimeter across all
+  `exclude_polygons` in one request) is tuned for a handful of exclusions, not a
+  multi-incident coastal flooding drill's worth of H3 hexagons. Fixed by setting
+  `--service-limits-max-exclude-polygons-length 200000` in `entrypoint.sh`'s
+  `valhalla_build_config` call — generous enough for a realistic multi-incident scenario
+  across the whole pilot bbox, still a bounded, server-controlled limit (the public
+  `/route` endpoint never accepts `exclude_polygons` from a caller — only server-built
+  geometry from the app's own escalation-gated hazard data reaches Valhalla).
+- **`scripts/drill.py`** — after the analyst issues a warning, requests a route from
+  inside the drill's own flood zone (Marina) to the nearest shelter. If
+  `avoided_hazards` is true, asserts (via a plain ray-casting point-in-polygon check, no
+  new dependency) that no point on the returned path falls inside the warning's excluded
+  geometry; if false, prints the honest explanation instead of asserting a guarantee
+  Valhalla itself couldn't provide.
+- **`frontend/components/MapView.tsx`** — new `shelters` and `route` map sources/layers
+  (shelter markers, click popup with status/capacity/address; a route line), and a
+  "🧭 Route to nearest shelter" button that geolocates (falling back to map center),
+  calls `/route`, fits the map to the returned path, and shows distance/duration plus the
+  hazard-avoidance warning notice when relevant.
+- Tests: `test_geo_distance.py` (the promoted `haversine_km`), `test_routing_polyline.py`
+  (decode correctness against a real captured Valhalla shape, empty-string edge case),
+  `test_routing_client.py` (request shape, exclude_polygons passthrough, and all three
+  `RoutingUnavailable` paths — HTTP error, connection error, no-trip-in-response),
+  `test_routing_service.py` (shelter CRUD, nearest-open selection, `exclude_polygons`
+  incident/alert filtering and dedup, `route_to_safety` composition, and — the important
+  one — the hazard-enclosure fallback: first call raises, retry drops the exclusion and
+  succeeds, `avoided_hazards` correctly flips to false), `test_routing_seed.py` (seeds
+  once, never overwrites existing shelters).
+
+**Verified live, not just under mocks:** built the pilot OSM extract for real
+(Geofabrik → osmium-tool clip → 22 MB pilot pbf) and built real Valhalla tiles from it
+(~6 seconds for this pilot's bbox) — confirmed with a real walking route between two
+pilot points returning genuine street-level turn-by-turn instructions ("Walk north on
+Marina Beach Road..."), not synthetic output. Confirmed `exclude_polygons` genuinely
+changes the computed path (a route with a polygon placed across the direct path grew
+from 7.93 km to 8.885 km — a real detour, not a no-op). Rebuilt and ran the full backend
+test suite (244 tests) against a from-scratch database (the migration fix above), then
+ran `scripts/drill.py` clean end to end: real shelters seeded at startup, `/map/shelters`
+serving them, `/route` returning a real shelter + real routed path, and the drill's new
+hazard-avoidance check exercising both branches across two runs — a successful exclusion
+(before hazard data accumulated) and the honest `avoided_hazards: false` fallback (once
+the drill's own flood zone had grown to enclose the starting point) — with backend/
+worker logs showing no unexpected exceptions (only the expected Valhalla
+"Forward search exhausted" messages from the deliberately-trapped first attempt).
+Live-verified analyst shelter CRUD (create → patch to `closed` → confirmed excluded from
+`nearest_open_shelter` while still visible on `/map/shelters` → delete) and that both
+`/analyst/shelters` and `/route` enforce the correct trust boundary (401 without a token
+for the former, open for the latter). Fetched the live frontend and confirmed the
+compiled bundle serves the "Route to safety" button and shelter/route map layers, not
+just that the route compiled into the build.
+
+**Not built:**
+- **A real shelter registry** — `shelters_seed.json` is explicitly labeled illustrative
+  pilot seed data, not a verified government registry import; analyst CRUD is the real,
+  ongoing mechanism, same honest-stub role every other pilot seed list plays in this
+  project.
+- **Admin/timezone databases** for Valhalla (turn narrative place-names, DST-aware
+  ETAs) — skipped to avoid extra downloads this pilot scope doesn't need; route
+  geometry, distance/duration, and `exclude_polygons` are unaffected.
+- **A costing-mode UI toggle** — the frontend always requests
+  `routing_default_costing` (pedestrian); the API already accepts a `costing` query
+  param for anyone who wants to call it directly (e.g. `auto` for vehicle evacuation),
+  it's just not exposed as a frontend control this round.
+- **Vehicle-scale evacuation routing (many people at once, road capacity)** — this is
+  single-traveler shortest-path routing, not a mass-evacuation traffic model; out of
+  scope for the phase-2 plan's "Route API" deliverable.
+
 ## Goals
 
 Add the third and fourth verification streams (satellite, richer instruments), meet people
@@ -568,7 +735,11 @@ drills, or (c) the phase-3 service split begins. Record the decision here when t
    end-to-end (drill's PFZ/sea-state checks, a full Tamil IVR call sequence producing a
    real report); WhatsApp localization and fisherman registration on WhatsApp/IVR remain
    out of scope (see milestone 5's "as built" section)
-6. Valhalla routing + shelters + public map routing UI
+6. ✅ Valhalla routing + shelters + public map routing UI — real Valhalla over a real
+   pilot-scoped OSM extract (not a stub), verified live end-to-end (real routed paths,
+   `exclude_polygons` genuinely changing the path, shelter CRUD, drill's hazard-avoidance
+   check); found and fixed a real from-scratch-migration bug and a real Valhalla
+   service-limit bug along the way (see milestone 6's "as built" section)
 
 ## Verification
 
@@ -596,5 +767,9 @@ drills, or (c) the phase-3 service split begins. Record the decision here when t
   drill's forced refresh and via the live frontend `/sea` page (`curl` → HTTP 200); the
   `is_local` sea-state flag verified to correctly distinguish the drill's own nearby
   tide gauge from the far-away NDBC demo buoy.
-- Routing: request from a point inside a drill flood zone → route avoids closed cells
-  (assert no polyline vertex inside excluded polygons).
+- ✅ Routing: request from a point inside a drill flood zone → route avoids closed cells
+  (asserted live via ray-casting point-in-polygon over the real returned path, no
+  polyline vertex inside the excluded warning geometry, when avoidance succeeds); the
+  drill also exercises the honest fallback when hazard geometry fully encloses the
+  starting point (`avoided_hazards: false` rather than a hard failure) — see milestone
+  6's "as built" section for both.

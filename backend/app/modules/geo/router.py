@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db
-from app.models import Incident, Report, SensorReading, Station, StationAnomaly
+from app.models import Incident, Report, SensorReading, Shelter, Station, StationAnomaly
 from app.modules.geo.h3utils import cell_centroid, cell_polygon
 from app.modules.geo.hotspots import hotspots_geojson
 
@@ -81,6 +81,28 @@ def public_incidents(db: Session = Depends(get_db)) -> dict:
 @router.get("/hotspots")
 def hotspots(db: Session = Depends(get_db)) -> dict:
     return hotspots_geojson(db)
+
+
+@router.get("/shelters")
+def shelters(db: Session = Depends(get_db)) -> dict:
+    rows = db.scalars(select(Shelter)).all()
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [s.lon, s.lat]},
+                "properties": {
+                    "id": str(s.id),
+                    "name": s.name,
+                    "capacity": s.capacity,
+                    "status": s.status,
+                    "address": s.address,
+                },
+            }
+            for s in rows
+        ],
+    }
 
 
 @router.get("/stations")

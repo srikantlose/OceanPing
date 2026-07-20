@@ -149,9 +149,6 @@ class _SensorDb:
         return _FakeScalars(self._anomalies)
 
 
-def test_haversine_km_zero_for_same_point():
-    assert service._haversine_km(13.05, 80.28, 13.05, 80.28) == 0.0
-
 
 def test_nearest_station_picks_closest_by_distance():
     near = SimpleNamespace(id="near", name="Near Station", lat=13.06, lon=80.30)

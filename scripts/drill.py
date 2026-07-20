@@ -72,6 +72,20 @@ def call(api: str, path: str, *, method: str = "GET", token: str | None = None,
         raise SystemExit(f"HTTP {exc.code} on {method} {path}: {body}") from exc
 
 
+def _point_in_ring(point: list[float], ring: list[list[float]]) -> bool:
+    """Ray-casting point-in-polygon, [lon, lat] pairs — good enough for a
+    single closed ring at this scale (no holes to worry about)."""
+    x, y = point
+    inside = False
+    n = len(ring)
+    for i in range(n):
+        x1, y1 = ring[i]
+        x2, y2 = ring[(i + 1) % n]
+        if ((y1 > y) != (y2 > y)) and (x < (x2 - x1) * (y - y1) / (y2 - y1) + x1):
+            inside = not inside
+    return inside
+
+
 def poll_deliveries(api: str, token: str, alert_id: str, attempts: int = 10, delay: float = 1.0) -> list:
     """The delivery worker is a separate process draining a queue — give it a
     few seconds to pick the alert up before declaring no delivery happened."""
@@ -212,6 +226,34 @@ def main() -> None:
         assert any(f["properties"]["id"] == warning["id"] for f in public_alerts["features"]), \
             "issued warning did not appear on the public alert map"
         print(f"   public map now shows {len(public_alerts['features'])} active alert(s), incl. the warning")
+
+        print("→ Requesting a route to safety from inside the drill flood zone…")
+        route = call(args.api, f"/route?lat={MARINA[0]}&lon={MARINA[1]}")
+        assert route["shelter"], "expected a nearest open shelter — did shelter seeding run at startup?"
+        assert route["route"], (
+            "expected a routed path — is the valhalla container up with tiles built? "
+            "(run scripts/routing/fetch_osm_extract.sh, then `docker compose up -d --build valhalla`)"
+        )
+        route_coords = route["route"]["geometry"]["coordinates"]
+        print(f"   route to {route['shelter']['name']}: {route['route']['properties']['distance_km']} km, "
+              f"{route['route']['properties']['duration_min']} min, {route['excluded_cells']} hazard cell(s) "
+              f"currently active")
+        if route["avoided_hazards"]:
+            warning_feature = next(f for f in public_alerts["features"] if f["properties"]["id"] == warning["id"])
+            excluded_rings = [ring for polygon in warning_feature["geometry"]["coordinates"] for ring in polygon]
+            violations = [pt for pt in route_coords if any(_point_in_ring(pt, ring) for ring in excluded_rings)]
+            assert not violations, (
+                f"route passes through {len(violations)} point(s) inside the warning's excluded zone — "
+                "exclude_polygons isn't actually being honored"
+            )
+            print(f"   confirmed none of the {len(route_coords)} path points fall inside the excluded zone")
+        else:
+            # A hard exclusion can trap a route entirely when the traveler's own
+            # starting point sits inside the excluded hazard geometry — the origin
+            # here (Marina) is deliberately ground zero for the drill's flood
+            # reports, so this is the expected outcome for this scenario, not a bug.
+            print("   hazard geometry fully enclosed the starting point — routed through it "
+                  "rather than leaving the evacuee with no path at all (see service.py's fallback)")
 
         print("→ Checking the warning itself was fanned out to subscribers…")
         deliveries = poll_deliveries(args.api, token, warning["id"])

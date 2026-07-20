@@ -155,6 +155,19 @@ class Settings(BaseSettings):
     pfz_refresh_hours: float = 24.0
     pfz_validity_hours: float = 60.0
 
+    # Evacuation routing (phase 2, milestone 6): unlike every other external
+    # integration in this app, Valhalla is real and running, not a stub — see
+    # docker/valhalla/ + scripts/routing/fetch_osm_extract.sh. It's gated on
+    # reachability rather than a credential: a self-hosted routing engine has
+    # no API key, but its tiles take a one-time build after the OSM extract
+    # script runs, so "not up yet" is a real, expected degrade mode. Hazard
+    # geometry is only excluded from a route once it's cleared the same
+    # escalation gate as everywhere else in this app (corroborated+ incidents,
+    # analyst-issued warning alerts) — never from raw citizen report volume.
+    valhalla_url: str = "http://valhalla:8002"
+    routing_default_costing: str = "pedestrian"
+    routing_active_incident_hours: float = 24.0
+
     class Config:
         env_file = ".env"
         extra = "ignore"

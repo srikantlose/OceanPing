@@ -1,0 +1,34 @@
+[
+  {
+    "name": "Marina-area pilot shelter (seed data — verify locally)",
+    "lat": 13.038,
+    "lon": 80.245,
+    "capacity": 200,
+    "status": "open",
+    "address": "A few km inland of Marina Beach, Chennai — illustrative pilot location only"
+  },
+  {
+    "name": "Besant Nagar-area pilot shelter (seed data — verify locally)",
+    "lat": 12.995,
+    "lon": 80.235,
+    "capacity": 150,
+    "status": "open",
+    "address": "A few km inland of Besant Nagar / Elliot's Beach, Chennai — illustrative pilot location only"
+  },
+  {
+    "name": "Kasimedu-area pilot shelter (seed data — verify locally)",
+    "lat": 13.108,
+    "lon": 80.255,
+    "capacity": 300,
+    "status": "open",
+    "address": "A few km inland of Kasimedu fishing harbour, Chennai — illustrative pilot location only"
+  },
+  {
+    "name": "Injambakkam-area pilot shelter (seed data — verify locally)",
+    "lat": 12.918,
+    "lon": 80.215,
+    "capacity": 100,
+    "status": "open",
+    "address": "A few km inland of Injambakkam, Chennai — illustrative pilot location only"
+  }
+]
