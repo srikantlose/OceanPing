@@ -24,6 +24,7 @@ def _alert_out(alert: Alert) -> dict:
         "message": alert.message,
         "issued_by": alert.issued_by,
         "note": alert.note,
+        "predicted_flooded_cells": alert.predicted_flooded_cells,
         "created_at": alert.created_at.isoformat(),
         "expires_at": alert.expires_at.isoformat() if alert.expires_at else None,
     }
@@ -121,6 +122,7 @@ def public_alerts(db: Session = Depends(get_db)) -> dict:
                     "hazard_type": a.hazard_type,
                     "message": a.message.get("en", ""),
                     "issued_by": a.issued_by or "automatic",
+                    "predicted_flooded_cells_count": len(a.predicted_flooded_cells or []),
                     "created_at": a.created_at.isoformat(),
                     "expires_at": a.expires_at.isoformat() if a.expires_at else None,
                 },

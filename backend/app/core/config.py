@@ -168,6 +168,18 @@ class Settings(BaseSettings):
     routing_default_costing: str = "pedestrian"
     routing_active_incident_hours: float = 24.0
 
+    # Inundation model (phase 3, milestone 1): a bathtub model over a real
+    # Copernicus DEM GLO-30 extract for the pilot area (see
+    # scripts/inundation/) — the per-cell elevation table is real ingested
+    # data, not a stub. Live alert/routing wiring is gated on a fresh reading
+    # of this sensor variable, same credential/data-gated-degrade pattern as
+    # every other real integration here: stations.json's real INCOIS tide
+    # gauge is disabled (no dataset id available), so in an untouched
+    # environment this wiring stays a no-op until drill.py injects one or a
+    # real gauge is configured.
+    inundation_reference_variable: str = "water_level"
+    inundation_wire_hours: float = 2.0
+
     class Config:
         env_file = ".env"
         extra = "ignore"

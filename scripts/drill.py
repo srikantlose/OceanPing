@@ -206,6 +206,21 @@ def main() -> None:
     print(f"   {len(active_alerts)} active alert(s); none auto-escalated to warning "
           "(warning is analyst-only, as designed)")
 
+    print("→ Checking the bathtub inundation model against the drill's gauge surge (real Copernicus DEM data)…")
+    inundation = call(args.api, "/map/inundation?level=2.6")
+    assert inundation["cell_count"] > 0, (
+        "expected some coastal cells at/below a 2.6 m water level near Chennai — "
+        "did scripts/inundation/build_elevation_cells.sh run and get seeded?"
+    )
+    print(f"   at a 2.6 m water level, {inundation['cell_count']} coastal cell(s) would flood")
+    flood_wired_alert = next((a for a in active_alerts if a["predicted_flooded_cells"]), None)
+    assert flood_wired_alert, (
+        "expected an auto-proposed alert to carry predicted_flooded_cells from the live gauge surge "
+        "— is alerts/service.py's inundation wiring broken?"
+    )
+    print(f"   [{flood_wired_alert['tier']:>8}] {flood_wired_alert['hazard_type']} alert carries "
+          f"{len(flood_wired_alert['predicted_flooded_cells'])} predicted flooded cell(s) from the live gauge reading")
+
     if active_alerts:
         print("→ Checking the delivery worker fanned the auto-proposed alert out to the drill subscriber…")
         deliveries = poll_deliveries(args.api, token, active_alerts[0]["id"])

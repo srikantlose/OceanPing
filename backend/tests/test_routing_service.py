@@ -113,6 +113,7 @@ class _ExcludeDb:
 
 def test_exclude_polygons_includes_corroborated_incident_cells(monkeypatch):
     monkeypatch.setattr(service, "get_settings", lambda: SimpleNamespace(routing_active_incident_hours=24.0))
+    monkeypatch.setattr(service, "inundation_flooded_cells", lambda db: set())
     incident = SimpleNamespace(h3_cells=[_CELL_A, _CELL_B])
     db = _ExcludeDb(incidents=[incident], alerts=[])
     polygons = service.exclude_polygons(db)
@@ -121,6 +122,7 @@ def test_exclude_polygons_includes_corroborated_incident_cells(monkeypatch):
 
 def test_exclude_polygons_includes_warning_alert_cells(monkeypatch):
     monkeypatch.setattr(service, "get_settings", lambda: SimpleNamespace(routing_active_incident_hours=24.0))
+    monkeypatch.setattr(service, "inundation_flooded_cells", lambda db: set())
     alert = SimpleNamespace(h3_cells=[_CELL_C])
     db = _ExcludeDb(incidents=[], alerts=[alert])
     polygons = service.exclude_polygons(db)
@@ -129,6 +131,7 @@ def test_exclude_polygons_includes_warning_alert_cells(monkeypatch):
 
 def test_exclude_polygons_dedupes_overlapping_cells(monkeypatch):
     monkeypatch.setattr(service, "get_settings", lambda: SimpleNamespace(routing_active_incident_hours=24.0))
+    monkeypatch.setattr(service, "inundation_flooded_cells", lambda db: set())
     incident = SimpleNamespace(h3_cells=[_CELL_A])
     alert = SimpleNamespace(h3_cells=[_CELL_A])  # same cell as the incident
     db = _ExcludeDb(incidents=[incident], alerts=[alert])
@@ -138,7 +141,26 @@ def test_exclude_polygons_dedupes_overlapping_cells(monkeypatch):
 
 def test_exclude_polygons_empty_when_nothing_active(monkeypatch):
     monkeypatch.setattr(service, "get_settings", lambda: SimpleNamespace(routing_active_incident_hours=24.0))
+    monkeypatch.setattr(service, "inundation_flooded_cells", lambda db: set())
     assert service.exclude_polygons(_ExcludeDb()) == []
+
+
+def test_exclude_polygons_includes_predicted_flooded_cells(monkeypatch):
+    """Real gauge + DEM data, not citizen reports — folded into the same
+    exclusion set as incident/warning cells."""
+    monkeypatch.setattr(service, "get_settings", lambda: SimpleNamespace(routing_active_incident_hours=24.0))
+    monkeypatch.setattr(service, "inundation_flooded_cells", lambda db: {_CELL_A})
+    polygons = service.exclude_polygons(_ExcludeDb())
+    assert len(polygons) == 1
+
+
+def test_exclude_polygons_dedupes_flooded_cell_already_covered_by_incident(monkeypatch):
+    monkeypatch.setattr(service, "get_settings", lambda: SimpleNamespace(routing_active_incident_hours=24.0))
+    monkeypatch.setattr(service, "inundation_flooded_cells", lambda db: {_CELL_A})
+    incident = SimpleNamespace(h3_cells=[_CELL_A])
+    db = _ExcludeDb(incidents=[incident], alerts=[])
+    polygons = service.exclude_polygons(db)
+    assert len(polygons) == 1
 
 
 # --- route_to_safety -----------------------------------------------------------

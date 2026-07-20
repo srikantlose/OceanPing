@@ -69,6 +69,8 @@ export default function MapView() {
     duration_min: number;
     avoided_hazards: boolean;
   } | null>(null);
+  const [floodLevel, setFloodLevel] = useState(1.0);
+  const [floodCellCount, setFloodCellCount] = useState<number | null>(null);
 
   const handleRouteToSafety = () => {
     if (!mapRef.current) return;
@@ -154,9 +156,22 @@ export default function MapView() {
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
 
     map.on("load", () => {
-      for (const id of ["hotspots", "alerts", "incident-cells", "incidents", "reports", "stations", "shelters", "route"]) {
+      for (const id of ["hotspots", "alerts", "incident-cells", "incidents", "reports", "stations", "shelters", "route", "inundation"]) {
         map.addSource(id, { type: "geojson", data: EMPTY_FC as any });
       }
+
+      map.addLayer({
+        id: "inundation-fill",
+        type: "fill",
+        source: "inundation",
+        paint: { "fill-color": "#2a7fd6", "fill-opacity": 0.35 },
+      });
+      map.addLayer({
+        id: "inundation-line",
+        type: "line",
+        source: "inundation",
+        paint: { "line-color": "#2a7fd6", "line-width": 1 },
+      });
 
       map.addLayer({
         id: "hotspots-fill",
@@ -362,6 +377,7 @@ export default function MapView() {
           `<div class="popup-title" style="color:${tierColor}">${ALERT_TIER_LABELS[p.tier] || p.tier}</div>
            <div class="popup-sub">${HAZARD_LABELS[p.hazard_type] || p.hazard_type} · issued by ${p.issued_by}</div>
            <div style="font-size:12px">${p.message}</div>
+           ${p.predicted_flooded_cells_count ? `<div class="spark-caption">predicted flooding: ${p.predicted_flooded_cells_count} cell(s) at current gauge level</div>` : ""}
            ${p.expires_at ? `<div class="spark-caption">expires ${new Date(p.expires_at).toLocaleString()}</div>` : ""}`
         );
       });
@@ -401,7 +417,17 @@ export default function MapView() {
         );
       });
 
-      for (const layer of ["stations-circles", "incidents-circles", "reports-circles", "alerts-fill", "shelters-circle"]) {
+      map.on("click", "inundation-fill", (e) => {
+        const p: any = e.features?.[0]?.properties;
+        if (!p) return;
+        popup(
+          e.lngLat,
+          `<div class="popup-title">Predicted flooding</div>
+           <div style="font-size:12px">Depth ${Number(p.depth_m).toFixed(1)} m at this water level</div>`
+        );
+      });
+
+      for (const layer of ["stations-circles", "incidents-circles", "reports-circles", "alerts-fill", "shelters-circle", "inundation-fill"]) {
         map.on("mouseenter", layer, () => (map.getCanvas().style.cursor = "pointer"));
         map.on("mouseleave", layer, () => (map.getCanvas().style.cursor = ""));
       }
@@ -412,6 +438,21 @@ export default function MapView() {
       mapRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    const run = async () => {
+      const fc = await fetchFC(`/map/inundation?level=${floodLevel}`);
+      (map.getSource("inundation") as any)?.setData(fc);
+      setFloodCellCount(typeof fc.cell_count === "number" ? fc.cell_count : (fc.features || []).length);
+    };
+    const timer = setTimeout(() => {
+      if (map.isStyleLoaded()) run();
+      else map.once("load", run);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [floodLevel]);
 
   return (
     <>
@@ -451,6 +492,25 @@ export default function MapView() {
         <div className="legend-row">
           <span className="legend-swatch" style={{ background: "#0ca30c" }} />
           Shelter / route
+        </div>
+        <div className="legend-row">
+          <span className="legend-swatch" style={{ background: "#2a7fd6" }} />
+          Predicted flooding (bathtub model)
+        </div>
+
+        <h4 style={{ marginTop: 8 }}>Inundation what-if</h4>
+        <input
+          type="range"
+          min={-2}
+          max={5}
+          step={0.1}
+          value={floodLevel}
+          onChange={(e) => setFloodLevel(parseFloat(e.target.value))}
+          style={{ width: "100%" }}
+        />
+        <div className="spark-caption">
+          Water level {floodLevel.toFixed(1)} m
+          {floodCellCount !== null ? ` · ${floodCellCount} cell(s) flooded` : ""}
         </div>
 
         <h4 style={{ marginTop: 8 }}>Route to safety</h4>

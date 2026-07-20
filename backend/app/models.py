@@ -197,6 +197,12 @@ class Alert(Base):
     status: Mapped[str] = mapped_column(String(16), default="active", index=True)  # active | expired
     issued_by: Mapped[str | None] = mapped_column(String(128), nullable=True)  # analyst username; None = automatic
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Snapshot of the bathtub model at issue/upgrade time for water-level-relevant
+    # hazards (see scoring/engine.py's HAZARD_VARIABLES) — a fixed list rather than
+    # recomputed on every read, so a later tide change doesn't retroactively change
+    # what an already-issued alert claimed. Empty when there's no fresh gauge
+    # reading to base a prediction on (see inundation/service.py).
+    predicted_flooded_cells: Mapped[list] = mapped_column(JSONB, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -323,6 +329,23 @@ class Shelter(Base):
     address: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ElevationCell(Base):
+    """Per-H3-cell (res 9) ground elevation, meters above the DEM's vertical
+    datum — real data from a Copernicus DEM GLO-30 extract (see
+    scripts/inundation/), not illustrative seed data. The bathtub model in
+    modules/inundation/engine.py floods a cell once a water level meets or
+    exceeds this value. Cells over open water can carry small negative
+    values (a known Copernicus DEM artifact — its radar source is unreliable
+    over water) rather than a clean 0; harmless here since those cells are
+    already permanently "flooded" either way."""
+    __tablename__ = "elevation_cells"
+
+    h3_cell: Mapped[str] = mapped_column(String(16), primary_key=True)
+    elevation_m: Mapped[float] = mapped_column(Float)
+    source: Mapped[str] = mapped_column(String(32), default="copernicus_dem_glo30")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 Index("ix_reports_cell_time", Report.h3_cell, Report.created_at)

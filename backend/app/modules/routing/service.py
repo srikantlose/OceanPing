@@ -18,6 +18,7 @@ from app.core.config import get_settings
 from app.models import Alert, Incident, Shelter
 from app.modules.geo.distance import haversine_km
 from app.modules.geo.h3utils import cell_polygon
+from app.modules.inundation.service import predicted_flooded_cells as inundation_flooded_cells
 from app.modules.routing import client
 from app.modules.routing.client import RoutingUnavailable
 from app.modules.routing.polyline import decode_polyline6
@@ -89,6 +90,10 @@ def exclude_polygons(db: Session) -> list[list[list[float]]]:
     ).all()
     for alert in warnings:
         cells.update(alert.h3_cells or [])
+
+    # Real gauge + DEM data, not citizen reports — no escalation-gate concern
+    # routing incident/warning cells above have to satisfy.
+    cells.update(inundation_flooded_cells(db))
 
     return [cell_polygon(cell) for cell in cells]
 

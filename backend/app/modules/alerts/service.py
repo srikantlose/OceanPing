@@ -15,13 +15,24 @@ from app.core.config import get_settings
 from app.models import Alert, Incident
 from app.modules.alerts import engine
 from app.modules.delivery.queue import enqueue_alert
+from app.modules.inundation.service import predicted_flooded_cells
 from app.modules.scoring.audit import append_audit
+from app.modules.scoring.engine import HAZARD_VARIABLES
 
 log = logging.getLogger(__name__)
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _flooded_cells_for(db: Session, hazard_type: str) -> list[str]:
+    """Predicted flooded cells to attach to an alert, or [] for a hazard the
+    bathtub model has nothing useful to say about (see HAZARD_VARIABLES) or
+    when there's no fresh gauge reading to base a prediction on."""
+    if "water_level" not in HAZARD_VARIABLES.get(hazard_type, set()):
+        return []
+    return sorted(predicted_flooded_cells(db))
 
 
 def _incident_signals(incident: Incident) -> tuple[int, float]:
@@ -63,11 +74,13 @@ def sync_incident_alert(db: Session, incident: Incident) -> Alert | None:
         return active  # no upgrade needed
 
     message = engine.draft_message(incident.hazard_type, tier, incident.report_count)
+    flooded_cells = _flooded_cells_for(db, incident.hazard_type)
     if active is not None:
         old_tier = active.tier
         active.tier = tier
         active.message = message
         active.h3_cells = incident.h3_cells
+        active.predicted_flooded_cells = flooded_cells
         alert = active
         event_type, payload = "alert.tier_changed", {"from": old_tier, "to": tier, "auto": True}
     else:
@@ -79,6 +92,7 @@ def sync_incident_alert(db: Session, incident: Incident) -> Alert | None:
             message=message,
             status="active",
             issued_by=None,
+            predicted_flooded_cells=flooded_cells,
             created_at=_utcnow(),
         )
         db.add(alert)
@@ -99,6 +113,7 @@ def issue_warning(
     settings = get_settings()
     expires_at = _utcnow() + timedelta(hours=expires_hours or settings.alert_default_expiry_hours)
     message = engine.draft_message(incident.hazard_type, "warning", incident.report_count, note)
+    flooded_cells = _flooded_cells_for(db, incident.hazard_type)
 
     active = _active_alert(db, incident.id)
     if active is not None:
@@ -108,6 +123,7 @@ def issue_warning(
         active.note = note
         active.message = message
         active.h3_cells = incident.h3_cells
+        active.predicted_flooded_cells = flooded_cells
         active.expires_at = expires_at
         alert = active
         event_type, payload = "alert.tier_changed", {"from": old_tier, "to": "warning", "analyst": analyst}
@@ -121,6 +137,7 @@ def issue_warning(
             status="active",
             issued_by=analyst,
             note=note,
+            predicted_flooded_cells=flooded_cells,
             created_at=_utcnow(),
             expires_at=expires_at,
         )

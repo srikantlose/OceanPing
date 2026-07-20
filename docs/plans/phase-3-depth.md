@@ -1,6 +1,7 @@
 # Phase 3 — Depth: Modeling, Ops Automation, Physical Edge, and the Service Split (months 7–10, gap plan)
 
-**Status: 🔲 planned.** Prereqs: phases 1–2 (alerts, delivery, satellite, routing).
+**Status: 🟡 in progress.** Milestone 1 (inundation model) built — see "Milestone 1 — as
+built" below. Prereqs: phases 1–2 (alerts, delivery, satellite, routing), both done.
 **Independent items**: inundation model, auto-SITREPs, CoastSnap/IoT pilot, drill scale-up.
 
 ## Goals
@@ -111,9 +112,90 @@ app toolchain (Expo/EAS).
 - Split risk: freeze features during the cutover; run monolith + consumers in parallel
   against drills before switching ingest.
 
+## Milestone 1 — as built
+
+Real data, not a stub: unlike the credential-gated satellite/WhatsApp/PFZ adapters
+elsewhere in this project, a DEM extract is public and downloadable without an
+account, so this milestone is the genuine bathtub model over real elevation data,
+mirroring the Valhalla precedent (phase 2, milestone 6) — the gate is a one-time
+data-prep step, not credentials.
+
+- **DEM source**: Copernicus DEM GLO-30, served from a public AWS Open Data S3
+  bucket (`copernicus-dem-30m`) over plain HTTPS — no account, no API key.
+  `scripts/inundation/fetch_dem_extract.sh` downloads the two 1°×1° tiles
+  covering a Chennai coastal pilot bbox (`80.10,12.85,80.40,13.30` — narrower
+  than the routing OSM bbox since inundation only matters near the coast, but
+  covers every named pilot location elsewhere in this project: Marina, Besant
+  Nagar, Kasimedu, Injambakkam, Ennore) and clips/merges them with GDAL, run in
+  a throwaway container (not baked into any long-lived image, same call as
+  osmium-tool in the routing milestone).
+- **Elevation table**: `scripts/inundation/build_elevation_cells.sh` enumerates
+  H3 res-9 cells over the bbox (throwaway `python:3.12-slim` + pip-installed
+  `h3`, no GDAL needed) and samples the DEM at each centroid via GDAL's Python
+  bindings (throwaway `ghcr.io/osgeo/gdal` image, no `rasterio` dependency
+  added anywhere). Output: `backend/app/modules/inundation/
+  elevation_cells_chennai.json` — 14,382 real cells, committed like
+  `routing/shelters_seed.json`, loaded into the new `elevation_cells` table by
+  `inundation/seed.py` once at startup (unlike shelters this isn't
+  analyst-editable, but "once, if empty" is still right — nothing to
+  reconcile against a live edit). Some cells over open water carry small
+  negative elevations, a known Copernicus DEM radar artifact — harmless here
+  since those cells are already permanently "flooded" either way.
+- **Bathtub model** (`inundation/engine.py`): pure function, no I/O — a cell
+  floods once its elevation is at or below the water level; depth is the
+  difference. Deliberately the simplest hydrologically-defensible model (no
+  flow routing, no connectivity check); ANUGA hydrodynamic simulation remains
+  the named upgrade path.
+  `GET /map/inundation?level=` (in `geo/router.py`) exposes it publicly for
+  "what if" queries — a preparedness slider on the map, not tied to any live
+  reading.
+- **Live wiring, gated on a real gauge reading**: `inundation/service.py`'s
+  `predicted_flooded_cells()` looks up the freshest `water_level` sensor
+  reading (`inundation_wire_hours`, default 2h) and applies the bathtub model
+  — empty if nothing fresh exists. There is no live INCOIS tide gauge
+  configured (`stations.json`'s `incois-chennai-tide` is disabled — see the
+  phase-2 milestone-1 note), so in an untouched environment this stays a
+  no-op until a real gauge is configured or a drill injects a reading — same
+  credential/data-gated-degrade pattern as every other real integration here.
+  - **Alerts**: `alerts/service.py` snapshots the predicted flooded-cell set
+    onto the `Alert` row (new `predicted_flooded_cells` column) whenever an
+    alert is created or its tier upgrades, gated on the hazard type actually
+    having a water-level signal (`scoring/engine.py`'s `HAZARD_VARIABLES`) —
+    oil spills never get a flood prediction attached. A fixed snapshot, not
+    recomputed on every read, so a later tide change doesn't retroactively
+    change what an already-issued alert claimed (same semantics `h3_cells`
+    already has).
+  - **Routing**: `routing/service.py::exclude_polygons()` unions the live
+    predicted flooded cells into the same set as corroborated-incident and
+    warning-alert cells — legitimate to include unconditionally since it's
+    gauge + DEM data, not citizen reports, so it carries no escalation-gate
+    concern.
+- **Frontend**: `MapView.tsx` gets a blue flooded-cell layer, a "what if"
+  water-level slider (`GET /map/inundation?level=`, debounced), a click popup
+  showing depth, and the alert popup now shows a predicted-flooded-cell count
+  when present.
+- **Live-verified**: `scripts/drill.py` now checks `/map/inundation?level=2.6`
+  against the drill's injected tide-gauge surge (real DEM data: 5,663–5,689
+  coastal cells flood at that level) and asserts an auto-proposed
+  coastal_flooding alert actually carries `predicted_flooded_cells`. Full
+  drill run against a freshly reset dev DB (migrations 0001→0010 replayed
+  clean) confirmed: elevation seed (14,382 cells), inundation endpoint, alert
+  wiring, routing exclusion count including flood cells, and the existing
+  hazard-enclosure fallback all working together end-to-end. 276 backend
+  tests passing.
+- **Not built** (explicit gaps, not oversights): DEM coverage is pilot-scoped
+  (Chennai coastal strip only, same as OSM/PFZ/IVR pilot scoping elsewhere);
+  no flow routing/connectivity check (a cell cut off from the sea by a ridge
+  still "floods," same as a real bathtub); no forecast integration yet — the
+  "gauge reading" driving live wiring is the current instantaneous reading,
+  not a predicted future level (that's milestone 3's job); frontend slider
+  wasn't visually verified in a browser in this environment (no browser
+  automation tool available here) — verified via the live API responses and
+  a successful Next.js dev-server render instead.
+
 ## Milestones
 
-1. Inundation model + alert/routing wiring (independent)
+1. Inundation model + alert/routing wiring (independent) — ✅ built, see above
 2. Auto-SITREPs (independent, high agency value)
 3. Forecasting + propagation pre-alerts
 4. Rumor tracker + alert drafting
@@ -125,6 +207,7 @@ app toolchain (Expo/EAS).
 ## Verification
 
 - Inundation: known DEM fixture → assert flooded-cell set at levels L1<L2 nests correctly.
+  ✅ `test_inundation_engine.py`, plus a real-DEM live check in `scripts/drill.py`.
 - SITREP: drill event → generated SITREP contains only verified-data numbers (assert
   against DB counts).
 - Propagation: drill with directional report sequence → projected cells lie ahead of the

@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from app.modules.chat.corpus import seed_corpus
+    from app.modules.inundation.seed import seed_elevation_cells
     from app.modules.routing.seed import seed_shelters
     from app.modules.sensors.service import sync_stations
 
@@ -51,6 +52,15 @@ async def lifespan(app: FastAPI):
         seed_shelters(db)
     except Exception:
         log.exception("Shelter seed failed at startup")
+        db.rollback()
+    finally:
+        db.close()
+
+    db = SessionLocal()
+    try:
+        seed_elevation_cells(db)
+    except Exception:
+        log.exception("Elevation cell seed failed at startup")
         db.rollback()
     finally:
         db.close()

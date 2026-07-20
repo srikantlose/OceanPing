@@ -10,6 +10,7 @@ from app.core.db import get_db
 from app.models import Incident, Report, SensorReading, Shelter, Station, StationAnomaly
 from app.modules.geo.h3utils import cell_centroid, cell_polygon
 from app.modules.geo.hotspots import hotspots_geojson
+from app.modules.inundation.service import flooded_cells_geojson
 
 router = APIRouter(prefix="/map", tags=["map"])
 
@@ -81,6 +82,16 @@ def public_incidents(db: Session = Depends(get_db)) -> dict:
 @router.get("/hotspots")
 def hotspots(db: Session = Depends(get_db)) -> dict:
     return hotspots_geojson(db)
+
+
+@router.get("/inundation")
+def inundation(level: float, db: Session = Depends(get_db)) -> dict:
+    """Bathtub-model flooded cells for an arbitrary "what if" water level
+    (meters), e.g. a preparedness briefing ("show me 1.5m") or a live gauge
+    reading a caller wants to check against. Not tied to the current
+    real-time gauge reading — see alerts/service.py and routing/service.py
+    for the endpoints that use the *live* prediction."""
+    return flooded_cells_geojson(db, level)
 
 
 @router.get("/shelters")
