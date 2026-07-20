@@ -16,6 +16,7 @@ from app.modules.geo.router import router as geo_router
 from app.modules.ingest.router import router as ingest_router
 from app.modules.ivr.router import router as ivr_router
 from app.modules.routing.router import router as routing_router
+from app.modules.sitrep.router import router as sitrep_router
 from app.modules.whatsapp.router import router as whatsapp_router
 
 logging.basicConfig(level=logging.INFO)
@@ -91,6 +92,7 @@ app.include_router(whatsapp_router)
 app.include_router(ivr_router)
 app.include_router(fisherman_router)
 app.include_router(routing_router)
+app.include_router(sitrep_router)
 
 
 @app.get("/healthz")

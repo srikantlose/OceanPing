@@ -12,6 +12,8 @@ What it does:
   4. Forces a pipeline tick (anomaly detection + rescoring).
   5. Prints the resulting confidence/status picture, verifies one report as
      the analyst, and checks the audit chain is intact.
+  6. Generates and files an auto-SITREP, checking its counts against an
+     independently recomputed tally from /analyst/reports.
 """
 import argparse
 import json
@@ -289,6 +291,27 @@ def main() -> None:
              token=token, json_body={"note": "Drill: confirmed vs tide gauge + cluster"})
         public = call(args.api, "/map/reports")
         print(f"   public map now shows {len(public['features'])} verified report(s)")
+
+    print("→ Generating an auto-SITREP and checking it reports only verified DB counts…")
+    sitrep = call(args.api, "/analyst/sitreps/generate", method="POST", token=token)
+    recon_reports = call(args.api, "/analyst/reports?limit=500", token=token)
+    period_start = datetime.fromisoformat(sitrep["period_start"])
+    period_end = datetime.fromisoformat(sitrep["period_end"])
+    in_window = [r for r in recon_reports if period_start <= datetime.fromisoformat(r["created_at"]) < period_end]
+    reported_total = sitrep["content"]["sections"]["reports"]["total"]
+    assert reported_total == len(in_window), (
+        f"SITREP claims {reported_total} report(s) for its period but independently recomputing from "
+        f"/analyst/reports gives {len(in_window)} — did build_snapshot's query drift from what it reports?"
+    )
+    print(f"   SITREP {sitrep['id'][:8]} ({sitrep['period_start']} → {sitrep['period_end']}): "
+          f"{reported_total} report(s), matches an independent recount from /analyst/reports")
+    print(f"   \"{sitrep['content']['summary']}\"")
+
+    print(f"→ Analyst files SITREP {sitrep['id'][:8]}…")
+    filed = call(args.api, f"/analyst/sitreps/{sitrep['id']}/file", method="POST", token=token, json_body={})
+    assert filed["status"] == "filed", "expected the SITREP to move to filed status"
+    assert filed["filed_by"] == args.username
+    print(f"   filed by {filed['filed_by']}")
 
     chain = call(args.api, "/analyst/audit/verify", token=token)
     print(f"→ Audit chain: intact={chain['intact']} over {chain['entries_checked']} entries")

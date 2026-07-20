@@ -180,6 +180,15 @@ class Settings(BaseSettings):
     inundation_reference_variable: str = "water_level"
     inundation_wire_hours: float = 2.0
 
+    # Auto-SITREPs (phase 3, milestone 2): hourly draft in NDMA format built
+    # only from verified DB state (report/incident counts, alerts issued,
+    # hotspot movement, shelter resources) — see modules/sitrep/. This is
+    # both the scheduler cadence and the reporting window length when there's
+    # no prior SITREP to anchor to; the normal case just starts the window at
+    # the previous SITREP's period_end, so windows tile without gaps or
+    # overlap regardless of this setting.
+    sitrep_period_hours: float = 1.0
+
     class Config:
         env_file = ".env"
         extra = "ignore"

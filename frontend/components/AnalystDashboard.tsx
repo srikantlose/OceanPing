@@ -136,6 +136,81 @@ function Login({ onToken }: { onToken: (t: string) => void }) {
   );
 }
 
+function Sitreps({ token }: { token: string }) {
+  const fetcher = (path: string) => getJSON(path, token);
+  const { data: sitreps, mutate } = useSWR("/analyst/sitreps?limit=20", fetcher, {
+    refreshInterval: 30_000,
+  });
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  async function generateNow() {
+    await postJSON("/analyst/sitreps/generate", {}, token);
+    mutate();
+  }
+
+  async function file(id: string) {
+    await postJSON(`/analyst/sitreps/${id}/file`, {}, token);
+    mutate();
+  }
+
+  return (
+    <div className="card">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <h3 style={{ margin: 0 }}>SITREPs</h3>
+        <button onClick={generateNow}>Generate now</button>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
+        {(sitreps || []).map((s: any) => (
+          <div key={s.id} style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 10 }}>
+            <div
+              style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}
+              onClick={() => setExpandedId(expandedId === s.id ? null : s.id)}
+            >
+              <span>
+                <strong>{new Date(s.period_start).toLocaleString()}</strong>
+                {" → "}
+                {new Date(s.period_end).toLocaleTimeString()}{" "}
+                <span className="chip">{s.status}</span>
+              </span>
+              {s.status === "draft" && (
+                <button
+                  className="good"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    file(s.id);
+                  }}
+                >
+                  File
+                </button>
+              )}
+            </div>
+            <p style={{ fontSize: 13, marginTop: 6 }}>{s.content.summary}</p>
+            {expandedId === s.id && (
+              <pre
+                style={{
+                  whiteSpace: "pre-wrap",
+                  fontSize: 12,
+                  background: "var(--surface-2)",
+                  padding: 8,
+                  borderRadius: 6,
+                  marginTop: 6,
+                }}
+              >
+                {JSON.stringify(s.content.sections, null, 2)}
+              </pre>
+            )}
+          </div>
+        ))}
+        {(sitreps || []).length === 0 && (
+          <p style={{ color: "var(--muted)" }}>
+            No SITREPs yet — wait for the hourly job or click "Generate now".
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function AnalystDashboard() {
   const [token, setToken] = useState<string | null>(() =>
     typeof window === "undefined" ? null : localStorage.getItem("oceanping-analyst-token")
@@ -330,6 +405,8 @@ export default function AnalystDashboard() {
             </tbody>
           </table>
         </div>
+
+        <Sitreps token={token} />
       </div>
 
       <div className="card" style={{ alignSelf: "start", position: "sticky", top: 65 }}>

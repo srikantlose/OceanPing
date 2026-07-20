@@ -348,6 +348,27 @@ class ElevationCell(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class Sitrep(Base):
+    """Auto-generated NDMA-style situation report. Every number in `content`
+    is pulled straight from verified DB state at generation time (see
+    modules/sitrep/service.py::build_snapshot) — never invented or inferred —
+    so an analyst reviewing a draft is checking wording, not arithmetic.
+    `data_snapshot_hash` is a sha256 of the raw snapshot backing this report,
+    also carried in the audit log's sitrep.generated/sitrep.filed entries so
+    a filed SITREP is traceable back to the exact numbers it reported."""
+    __tablename__ = "sitreps"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=new_uuid)
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(16), default="draft", index=True)  # draft | filed
+    content: Mapped[dict] = mapped_column(JSONB, default=dict)
+    data_snapshot_hash: Mapped[str] = mapped_column(String(64))
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    filed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    filed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 Index("ix_reports_cell_time", Report.h3_cell, Report.created_at)
 Index("ix_readings_station_var_time", SensorReading.station_id, SensorReading.variable, SensorReading.time)
 Index("ix_subscriptions_channel_address", Subscription.channel, Subscription.address, unique=True)

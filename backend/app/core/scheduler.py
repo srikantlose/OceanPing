@@ -28,6 +28,7 @@ def build_scheduler() -> BackgroundScheduler:
     from app.modules.satellite.service import poll_satellite
     from app.modules.scoring.service import rescore_recent
     from app.modules.sensors.service import detect_anomalies, poll_all
+    from app.modules.sitrep.service import generate_sitrep
 
     settings = get_settings()
     scheduler = BackgroundScheduler(timezone="UTC")
@@ -41,7 +42,10 @@ def build_scheduler() -> BackgroundScheduler:
                       id="satellite_poll")
     scheduler.add_job(_job(refresh_pfz_advisories), "interval", hours=settings.pfz_refresh_hours,
                       id="pfz_refresh")
+    scheduler.add_job(_job(generate_sitrep), "interval", hours=settings.sitrep_period_hours,
+                      id="sitrep_generate")
     # One-shot initial jobs so the map/sea page have data right after startup.
     scheduler.add_job(_job(poll_all), id="erddap_poll_initial")
     scheduler.add_job(_job(refresh_pfz_advisories), id="pfz_refresh_initial")
+    scheduler.add_job(_job(generate_sitrep), id="sitrep_generate_initial")
     return scheduler

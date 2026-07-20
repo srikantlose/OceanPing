@@ -1,7 +1,8 @@
 # Phase 3 — Depth: Modeling, Ops Automation, Physical Edge, and the Service Split (months 7–10, gap plan)
 
-**Status: 🟡 in progress.** Milestone 1 (inundation model) built — see "Milestone 1 — as
-built" below. Prereqs: phases 1–2 (alerts, delivery, satellite, routing), both done.
+**Status: 🟡 in progress.** Milestones 1 (inundation model) and 2 (auto-SITREPs) built —
+see their "as built" sections below. Prereqs: phases 1–2 (alerts, delivery, satellite,
+routing), both done.
 **Independent items**: inundation model, auto-SITREPs, CoastSnap/IoT pilot, drill scale-up.
 
 ## Goals
@@ -193,10 +194,75 @@ data-prep step, not credentials.
   automation tool available here) — verified via the live API responses and
   a successful Next.js dev-server render instead.
 
+## Milestone 2 — as built
+
+- **New module `modules/sitrep/`**: `engine.py` is a pure function
+  (`build_sitrep(snapshot)`) that copies every number straight through from a
+  data snapshot into an NDMA-style draft (title, one-paragraph summary,
+  section dict) — it never invents or infers a figure, so an analyst
+  reviewing a draft is checking wording, not arithmetic. `service.py` builds
+  that snapshot from real DB state and owns the generate/file lifecycle;
+  `router.py` exposes it to the analyst dashboard.
+- **What's in a snapshot** (`service.py::build_snapshot`), all pulled fresh
+  from the DB for the report's period: citizen report counts (total, by
+  status, by hazard), incident counts (touched-in-period vs. newly first-seen
+  — one query, split in Python), alerts (issued this period vs. currently
+  active, tier/hazard/issued-by), shelter resources (open/total counts, known
+  open capacity), and the audit chain's own integrity check
+  (`scoring/audit.py::verify_chain`, reused as-is).
+- **Hotspot movement** (the plan's fourth required category) is real, not a
+  snapshot stub: each current hotspot from `geo/hotspots.py::compute_hotspots`
+  is matched against the *previous* SITREP's hotspot list by dominant hazard +
+  proximity (≤3 km, `geo/distance.py::haversine_km`) and tagged `new` or
+  `persisting`; previous hotspots with no current match are listed as
+  `cleared`. This needs no new table — each SITREP carries forward the
+  hotspot list it was generated against, so the next one has a baseline to
+  diff against. Live-verified: generating two SITREPs back to back over the
+  drill's Marina flood cluster correctly tagged both hotspots `persisting` on
+  the second call.
+- **Cadence and windowing**: hourly by default (`sitrep_period_hours`), via
+  `core/scheduler.py`'s existing APScheduler pattern (plus a startup one-shot,
+  same as the ERDDAP/PFZ jobs). A period's `period_start` is the *previous*
+  SITREP's `period_end` (falling back to `now - sitrep_period_hours` only for
+  the very first one ever), so periods tile back-to-back with no gaps or
+  overlap regardless of the configured cadence or restarts.
+- **Audit-linkable, not analyst-editable**: `sitreps.data_snapshot_hash` is a
+  sha256 of the exact snapshot dict the draft was built from
+  (`service.py::snapshot_hash`), and both `sitrep.generated` and
+  `sitrep.filed` audit-log entries carry that hash — so a filed SITREP is
+  traceable back to the precise numbers behind it, the same audit-chain
+  discipline every other decision in this app already gets. Filing
+  (`POST /analyst/sitreps/{id}/file`) only flips status/filed_by/filed_at; it
+  can never edit the drafted content, and a second file attempt on the same
+  SITREP is rejected (409).
+- **Frontend**: `AnalystDashboard.tsx` gets a SITREPs card — chronological
+  list with status chips, a one-line summary per SITREP, a "File" button on
+  drafts, an expandable raw-sections view, and a "Generate now" button for an
+  analyst who doesn't want to wait for the hourly tick (the same
+  `generate_sitrep()` the scheduler and the drill call).
+- **Live-verified**: `scripts/drill.py` now generates a SITREP after its full
+  sequence of reports/incidents/alerts/verification, independently
+  recomputes the report count for the SITREP's own declared period from
+  `/analyst/reports`, and asserts they match exactly — then files it and
+  confirms the filed status and analyst attribution. Ran clean against the
+  live stack (no dev-DB reset needed this time): 16 reports matched an
+  independent recount, both real Marina hotspots correctly tagged
+  `persisting` on a second generate call, audit chain intact over 117
+  entries. 298 backend tests passing (up from 276).
+- **Not built** (explicit gaps, not oversights): no casualty/relief-measure
+  section (that data doesn't exist yet — it's the recovery module, milestone
+  7); no PDF/Word export, `content` is structured JSON rendered by the
+  dashboard; no automatic delivery/emailing of filed SITREPs to NDMA or
+  district authorities (this app has no such integration yet); the frontend
+  SITREPs card wasn't visually verified interactively in a browser in this
+  environment (no browser automation tool available here) — verified via the
+  live API responses (including the two-generation hotspot-movement check
+  above) and a successful Next.js dev-server render instead.
+
 ## Milestones
 
 1. Inundation model + alert/routing wiring (independent) — ✅ built, see above
-2. Auto-SITREPs (independent, high agency value)
+2. Auto-SITREPs (independent, high agency value) — ✅ built, see above
 3. Forecasting + propagation pre-alerts
 4. Rumor tracker + alert drafting
 5. Mobile app with offline queue (mesh spike separate)
@@ -209,7 +275,9 @@ data-prep step, not credentials.
 - Inundation: known DEM fixture → assert flooded-cell set at levels L1<L2 nests correctly.
   ✅ `test_inundation_engine.py`, plus a real-DEM live check in `scripts/drill.py`.
 - SITREP: drill event → generated SITREP contains only verified-data numbers (assert
-  against DB counts).
+  against DB counts). ✅ `test_sitrep_engine.py` + `test_sitrep_service.py`, plus a real
+  live check in `scripts/drill.py` (independently recomputed report count) and a
+  two-generation hotspot-movement check against real data.
 - Propagation: drill with directional report sequence → projected cells lie ahead of the
   front, pre-alert proposed for an unreported village cell.
 - Split: replay identical drill on monolith vs. split deployment → identical end state
