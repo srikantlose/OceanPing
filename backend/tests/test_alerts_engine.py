@@ -44,21 +44,57 @@ def test_eligible_tier_signature_has_no_analyst_parameter():
 
 def test_draft_message_contains_tier_and_report_count():
     msg = engine.draft_message("coastal_flooding", "watch", 5)
-    assert "WATCH" in msg["en"]
-    assert "5 reports" in msg["en"]
-    assert "Coastal flooding" in msg["en"]
+    assert "WATCH" in msg["en"]["standard"]
+    assert "5 reports" in msg["en"]["standard"]
+    assert "Coastal flooding" in msg["en"]["standard"]
 
 
 def test_draft_message_singular_report_count():
     msg = engine.draft_message("high_waves", "advisory", 1)
-    assert "1 report " in msg["en"] or msg["en"].endswith("1 report).")
+    standard = msg["en"]["standard"]
+    assert "1 report " in standard or standard.endswith("1 report).")
 
 
 def test_draft_message_appends_note():
     msg = engine.draft_message("oil_spill", "warning", 2, note="Confirmed via satellite.")
-    assert "Confirmed via satellite." in msg["en"]
+    assert "Confirmed via satellite." in msg["en"]["standard"]
 
 
 def test_draft_message_unknown_hazard_falls_back_to_title_case():
     msg = engine.draft_message("weird_new_hazard", "advisory", 1)
-    assert "Weird New Hazard" in msg["en"]
+    assert "Weird New Hazard" in msg["en"]["standard"]
+
+
+def test_draft_message_covers_every_supported_language():
+    msg = engine.draft_message("tsunami", "warning", 3)
+    assert set(msg) == {"en", "ta", "te"}
+    for lang in msg:
+        assert msg[lang]["standard"]
+        assert msg[lang]["short"]
+
+
+def test_draft_message_short_variant_has_no_emoji():
+    msg = engine.draft_message("tsunami", "warning", 3)
+    assert engine.TIER_EMOJI["warning"] not in msg["en"]["short"]
+    assert engine.TIER_EMOJI["warning"] in msg["en"]["standard"]
+
+
+def test_message_text_picks_short_for_sms_and_whatsapp():
+    msg = engine.draft_message("tsunami", "watch", 2)
+    assert engine.message_text(msg, "en", "sms") == msg["en"]["short"]
+    assert engine.message_text(msg, "en", "whatsapp") == msg["en"]["short"]
+    assert engine.message_text(msg, "en", "telegram") == msg["en"]["standard"]
+    assert engine.message_text(msg, "en", "web_push") == msg["en"]["standard"]
+
+
+def test_message_text_falls_back_to_english_for_unknown_language():
+    msg = engine.draft_message("tsunami", "watch", 2)
+    assert engine.message_text(msg, "fr", "telegram") == msg["en"]["standard"]
+
+
+def test_message_text_handles_pre_milestone4_flat_string_rows():
+    """Alert rows created before per-channel-length variants existed still
+    have message["en"] as a plain string, not a variant dict."""
+    legacy = {"en": "Watch: coastal flooding (3 reports)."}
+    assert engine.message_text(legacy, "en", "sms") == legacy["en"]
+    assert engine.message_text(legacy, "ta", "telegram") == legacy["en"]

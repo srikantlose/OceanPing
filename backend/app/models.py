@@ -403,6 +403,57 @@ class Forecast(Base):
     validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class Narrative(Base):
+    """Rumor tracker (phase 3, milestone 4): a cluster of citizen reports whose
+    text repeats the same claim, found by clustering Report.embedding vectors
+    directly (see modules/narratives/engine.py) — independent of Incident's
+    spatial-adjacency clustering, since the same rumor can spread across
+    multiple locations/incidents that would never merge into one incident.
+    Only persisted once a cluster also contradicts something real (no active
+    instrument anomaly for the claimed hazard nearby, or an analyst has
+    already rejected a member report) — an unremarkable cluster of true
+    reports isn't a rumor, so it never gets a row here. `message` holds a
+    per-language, per-channel-length draft correction (same shape as
+    `Alert.message` — see alerts/engine.py::draft_message) that only goes out
+    once an analyst approves it (see modules/narratives/service.py); it is
+    never sent automatically."""
+    __tablename__ = "narratives"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=new_uuid)
+    hazard_type: Mapped[str] = mapped_column(String(32), index=True)
+    report_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    report_count: Mapped[int] = mapped_column(Integer, default=0)
+    h3_cells: Mapped[list] = mapped_column(JSONB, default=list)
+    centroid_lat: Mapped[float] = mapped_column(Float)
+    centroid_lon: Mapped[float] = mapped_column(Float)
+    representative_text: Mapped[str] = mapped_column(Text)
+    instrument_flat: Mapped[bool] = mapped_column(Boolean, default=False)
+    rejected_report_count: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(16), default="draft", index=True)  # draft | approved | dismissed
+    message: Mapped[dict] = mapped_column(JSONB, default=dict)  # {"en": {"standard":..., "short":...}, ...}
+    draft_method: Mapped[str] = mapped_column(String(16), default="template")  # template | llm
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    reviewed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class NarrativeDelivery(Base):
+    """Delivery log for an approved narrative correction — same shape as
+    `AlertDelivery`, kept as its own table rather than reusing `Alert`/
+    `AlertDelivery` directly: a correction isn't a hazard-tier proposal, and
+    letting one masquerade as an Alert row would risk `sync_incident_alert`'s
+    tier-upgrade logic silently overwriting it later."""
+    __tablename__ = "narrative_deliveries"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=new_uuid)
+    narrative_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("narratives.id"), index=True)
+    subscription_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("subscriptions.id"), index=True)
+    status: Mapped[str] = mapped_column(String(16))  # sent | failed | skipped
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 Index("ix_reports_cell_time", Report.h3_cell, Report.created_at)
 Index("ix_readings_station_var_time", SensorReading.station_id, SensorReading.variable, SensorReading.time)
 Index("ix_subscriptions_channel_address", Subscription.channel, Subscription.address, unique=True)
@@ -411,3 +462,12 @@ Index("ix_training_examples_outcome", TrainingExample.outcome)
 Index("ix_forecasts_kind_subject", Forecast.kind, Forecast.subject_id)
 Index("ix_satellite_observations_incident_recipe", SatelliteObservation.incident_id, SatelliteObservation.recipe)
 Index("ix_pfz_advisories_sector_valid", PfzAdvisory.sector, PfzAdvisory.valid_until)
+Index("ix_narratives_status_hazard", Narrative.status, Narrative.hazard_type)
+# Structural guarantee that the audit chain can never fork: in a valid chain
+# every entry's prev_hash is the previous entry's hash, so a repeated
+# prev_hash means two entries claim the same predecessor. Making that a
+# database constraint turns a fork from silent corruption (found much later
+# by verify_chain, unrecoverable by then) into a failed INSERT at write time.
+# scoring/audit.py's advisory lock is what stops the race in the first place;
+# this is the backstop if that is ever bypassed or wrong.
+Index("ix_audit_log_prev_hash", AuditLog.prev_hash, unique=True)

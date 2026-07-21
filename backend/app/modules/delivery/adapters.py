@@ -13,6 +13,7 @@ import httpx
 
 from app.core.config import get_settings
 from app.models import Alert, Subscription
+from app.modules.alerts.engine import message_text
 
 log = logging.getLogger(__name__)
 
@@ -24,7 +25,11 @@ class DeliveryResult:
 
 
 def _text_for(alert: Alert, subscription: Subscription) -> str:
-    return alert.message.get(subscription.lang) or alert.message.get("en", "")
+    """Resolves per-language/per-channel-length text (see
+    alerts/engine.py::message_text) — `alert` only needs a `.message` dict
+    here, so this also accepts the narrative-correction shim
+    modules/narratives/service.py passes in instead of a real Alert."""
+    return message_text(alert.message, subscription.lang, subscription.channel)
 
 
 class Adapter(Protocol):

@@ -4,12 +4,17 @@ can be reconstructed and defended after the fact."""
 import hashlib
 import json
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import AuditLog
 
 GENESIS_HASH = "0" * 64
+
+# Arbitrary fixed key for a Postgres transaction-scoped advisory lock (see
+# append_audit) — any bigint works, it just needs to be the same constant
+# every caller uses.
+AUDIT_CHAIN_LOCK_KEY = 8_921_034_751
 
 
 def canonical_envelope(event_type: str, subject_type: str, subject_id: str, payload: dict) -> str:
@@ -33,11 +38,38 @@ def compute_hash(prev_hash: str, envelope: str) -> str:
 def append_audit(
     db: Session, event_type: str, subject_type: str, subject_id: str, payload: dict
 ) -> AuditLog:
-    """Append one chained entry. Locks the chain tail to serialize writers.
-    Flushes but does not commit — joins the caller's transaction."""
-    tail = db.scalars(
-        select(AuditLog).order_by(AuditLog.id.desc()).limit(1).with_for_update()
-    ).first()
+    """Append one chained entry. Flushes but does not commit — joins the
+    caller's transaction.
+
+    Serializes writers with a transaction-scoped Postgres advisory lock taken
+    *before* reading the tail. The original approach here — `SELECT ... ORDER
+    BY id DESC LIMIT 1 FOR UPDATE` — looked like it serialized appends but
+    doesn't: under READ COMMITTED, Postgres picks which row to lock before
+    blocking on it, and when the lock is released it re-checks only that same
+    row rather than re-scanning for rows inserted meanwhile. So a second
+    writer blocked on the old tail wakes up, still sees the old tail, and
+    computes the same prev_hash as the writer that just committed — the chain
+    silently forks. Two concurrent scheduler jobs (sensor and propagation
+    forecast generation, which share an interval and therefore fire
+    simultaneously) hit this repeatedly in practice.
+
+    An advisory lock has no such row-identity ambiguity: it's one fixed key
+    every writer contends for, so the tail read after acquiring it always
+    reflects every committed append. It releases automatically at
+    commit/rollback and so can't leak across requests.
+
+    The lock is held from the first append in a transaction until that
+    transaction commits, which does serialize long multi-append jobs (e.g.
+    rescore_recent) against each other. That's inherent to a hash chain —
+    prev_hash can only reference a *committed* entry — and is the right
+    trade at this scale: appends are small, and a forked chain is
+    unrecoverable in a way a few milliseconds of lock wait is not.
+
+    Defence in depth: `audit_log.prev_hash` also carries a UNIQUE index (see
+    models.py), so even if this locking were ever bypassed or wrong again,
+    the second writer's INSERT fails loudly instead of persisting a fork."""
+    db.execute(select(func.pg_advisory_xact_lock(AUDIT_CHAIN_LOCK_KEY)))
+    tail = db.scalars(select(AuditLog).order_by(AuditLog.id.desc()).limit(1)).first()
     prev_hash = tail.hash if tail else GENESIS_HASH
     envelope = canonical_envelope(event_type, subject_type, subject_id, payload)
     entry = AuditLog(

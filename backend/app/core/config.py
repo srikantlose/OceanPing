@@ -205,6 +205,17 @@ class Settings(BaseSettings):
     # its last report — mirrors incident_window_hours.
     forecast_propagation_incident_hours: float = 6.0
 
+    # Rumor tracker (phase 3, milestone 4): clusters citizen reports by text-
+    # embedding similarity (not spatial adjacency — unlike incident merge, the
+    # same rumor can spread across locations that would never merge into one
+    # incident) and persists a Narrative only for a cluster that also
+    # contradicts something real — see modules/narratives/. Same cadence
+    # class as forecasting: a rumor doesn't need re-detection every couple of
+    # minutes either.
+    narrative_interval_minutes: int = 30
+    narrative_window_hours: float = 12.0
+    narrative_sim_threshold: float = 0.55
+
     class Config:
         env_file = ".env"
         extra = "ignore"

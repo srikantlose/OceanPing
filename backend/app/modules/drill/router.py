@@ -19,6 +19,7 @@ from app.modules.forecast.service import (
 )
 from app.modules.geo.hotspots import CACHE_KEY as HOTSPOT_CACHE_KEY
 from app.modules.ingest.service import RateLimited, create_report
+from app.modules.narratives.service import detect_narratives
 from app.modules.satellite.service import poll_satellite
 from app.modules.scoring.service import rescore_recent
 from app.modules.sensors.service import detect_anomalies, insert_readings
@@ -139,6 +140,7 @@ def tick(_: str = Depends(require_analyst), db: Session = Depends(get_db)) -> di
     sensor_forecasts = generate_sensor_forecasts(db)
     propagation_forecasts = generate_propagation_forecasts(db)
     validated_forecasts = validate_forecasts(db)
+    narratives_flagged = detect_narratives(db)
     try:  # drop the cached hotspot layer so the drill sees fresh clusters
         get_redis().delete(HOTSPOT_CACHE_KEY)
     except Exception:
@@ -150,4 +152,5 @@ def tick(_: str = Depends(require_analyst), db: Session = Depends(get_db)) -> di
         "propagation_forecasts": propagation_forecasts,
         "validated_forecasts": validated_forecasts,
         "pfz_zones": pfz_zones,
+        "narratives_flagged": narratives_flagged,
     }

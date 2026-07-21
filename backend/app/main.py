@@ -16,6 +16,7 @@ from app.modules.forecast.router import router as forecast_router
 from app.modules.geo.router import router as geo_router
 from app.modules.ingest.router import router as ingest_router
 from app.modules.ivr.router import router as ivr_router
+from app.modules.narratives.router import router as narratives_router
 from app.modules.routing.router import router as routing_router
 from app.modules.sitrep.router import router as sitrep_router
 from app.modules.whatsapp.router import router as whatsapp_router
@@ -95,6 +96,7 @@ app.include_router(fisherman_router)
 app.include_router(routing_router)
 app.include_router(sitrep_router)
 app.include_router(forecast_router)
+app.include_router(narratives_router)
 
 
 @app.get("/healthz")

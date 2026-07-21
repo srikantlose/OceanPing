@@ -18,6 +18,10 @@ What it does:
      front propagation forecasting, and backtests a sensor forecast against
      the drill gauge's own calm baseline so the full generate-then-validate
      loop can be checked immediately instead of waiting on real time.
+  8. Submits a near-duplicate algal_bloom report cluster near Ennore, checks
+     the rumor tracker leaves it unflagged until an analyst rejects one
+     member report, then approves the resulting correction draft and
+     confirms it was delivered to a subscriber near the rumor's location.
 """
 import argparse
 import json
@@ -33,6 +37,19 @@ from datetime import datetime, timedelta, timezone
 MARINA = (13.0500, 80.2824)  # Chennai Marina Beach
 DRILL_STATION = {"id": "drill-chennai-tide", "name": "Drill Tide Gauge — Chennai Marina",
                  "lat": 13.06, "lon": 80.30}
+
+# Rumor tracker drill (phase 3, milestone 4): a cluster of near-duplicate
+# citizen reports near Ennore, all tagged algal_bloom — a hazard with no
+# instrument signal at all (HAZARD_VARIABLES["algal_bloom"] is empty), so its
+# only possible contradiction path is an analyst having already rejected a
+# member report. Kept well clear of the Marina/Kasimedu clusters above.
+RUMOR_LOCATION = (13.2146, 80.3223)  # Ennore
+RUMOR_TEXTS = [
+    "huge algal bloom killing all the fish near Ennore, entire coast turning green and toxic",
+    "massive algal bloom near ennore killing fish everywhere, water has turned green and toxic",
+    "algal bloom disaster at ennore, fish dying everywhere, water is green and has a toxic smell",
+    "big algal bloom near ennore coast, dead fish everywhere, water turned toxic green",
+]
 
 # Hazard-front propagation drill (phase 3, milestone 3): a time-ordered report
 # sequence walking due north from south of Kasimedu fishing harbour, well
@@ -156,6 +173,7 @@ def main() -> None:
          json_body={"lat": MARINA[0], "lon": MARINA[1], "phone": "+911234500000", "lang": "en"})
 
     print(f"→ Submitting {len(REPORT_TEXTS)} citizen reports around Chennai Marina…")
+    marina_report_ids = []
     for i, (hazard, text) in enumerate(REPORT_TEXTS):
         lat = MARINA[0] + rng.uniform(-0.012, 0.012)
         lon = MARINA[1] + rng.uniform(-0.006, 0.006)
@@ -167,6 +185,7 @@ def main() -> None:
         if hazard:
             form["hazard_type"] = hazard
         rep = call(args.api, "/reports", method="POST", form=form)
+        marina_report_ids.append(rep["id"])
         print(f"   [{rep['status']:>11}] conf={rep['confidence']:.2f} "
               f"{rep['hazard_type']:<17} lang={rep['lang']:<5} \"{text[:48]}…\"")
 
@@ -199,7 +218,7 @@ def main() -> None:
           f"{tick['satellite_observations']} satellite observation(s) recorded, "
           f"{tick['pfz_zones']} PFZ zone(s) (re)issued, "
           f"{tick['sensor_forecasts']} sensor forecast(s), {tick['propagation_forecasts']} propagation forecast(s), "
-          f"{tick['validated_forecasts']} forecast(s) validated")
+          f"{tick['validated_forecasts']} forecast(s) validated, {tick['narratives_flagged']} narrative(s) flagged")
 
     print("→ Post-tick state:")
     reports = call(args.api, "/analyst/reports?limit=20", token=token)
@@ -244,8 +263,10 @@ def main() -> None:
     alerts = call(args.api, "/analyst/alerts", token=token)
     active_alerts = [a for a in alerts if a["status"] == "active"]
     for a in active_alerts[:6]:
+        en = a["message"].get("en", "")
+        text = en.get("standard", "") if isinstance(en, dict) else en
         print(f"   [{a['tier']:>8}] {a['hazard_type']:<17} issued_by={a['issued_by'] or 'auto':<10} "
-              f"\"{a['message'].get('en', '')[:60]}\"")
+              f"\"{text[:60]}\"")
     auto_tiers = {a["tier"] for a in active_alerts if a["issued_by"] is None}
     assert "warning" not in auto_tiers, "auto-issued alert reached warning tier — escalation gate is broken"
     print(f"   {len(active_alerts)} active alert(s); none auto-escalated to warning "
@@ -320,6 +341,79 @@ def main() -> None:
     accuracy = call(args.api, "/forecasts/accuracy")
     assert accuracy["sensor"], "expected the public accuracy endpoint to show at least one scored sensor forecast"
     print(f"   /forecasts/accuracy (public, per pilot location): {accuracy['sensor'][0]}")
+
+    print("→ Rumor tracker: checking the gauge-corroborated Marina flood cluster is NOT flagged as a rumor…")
+    call(args.api, "/analyst/narratives/detect", method="POST", token=token)
+    narratives = call(args.api, "/analyst/narratives?limit=200", token=token)
+    marina_match = next((n for n in narratives if set(marina_report_ids) & set(n["report_ids"])), None)
+    assert marina_match is None, (
+        f"the Marina flood reports were flagged as a rumor (narrative {marina_match['id'][:8] if marina_match else ''}) "
+        "even though the drill tide gauge is actively corroborating them — is_contradiction should be False "
+        "whenever a live instrument anomaly backs the claim. (A coastal_flooding report rejected in an earlier "
+        "session would also explain this.)"
+    )
+    print(f"   confirmed: {len(marina_report_ids)} repeating flood reports, none flagged — a live instrument "
+          "anomaly backs the claim, so volume alone never makes it a rumor")
+
+    print("→ Rumor tracker: submitting a near-duplicate algal_bloom report cluster near Ennore "
+          "(no instrument signal exists for this hazard, so only an analyst rejection can flag it)…")
+    call(args.api, "/subscribe/sms", method="POST",
+         json_body={"lat": RUMOR_LOCATION[0], "lon": RUMOR_LOCATION[1], "phone": "+911234500001", "lang": "en"})
+    rumor_report_ids = []
+    for i, text in enumerate(RUMOR_TEXTS):
+        lat = RUMOR_LOCATION[0] + rng.uniform(-0.003, 0.003)
+        lon = RUMOR_LOCATION[1] + rng.uniform(-0.003, 0.003)
+        rep = call(args.api, "/reports", method="POST", form={
+            "lat": f"{lat:.6f}", "lon": f"{lon:.6f}",
+            "client_id": f"drill-rumor-{i}",
+            "hazard_type": "algal_bloom",
+            "text": text,
+        })
+        rumor_report_ids.append(rep["id"])
+    print(f"   submitted {len(rumor_report_ids)} near-duplicate algal_bloom reports near Ennore")
+
+    print(f"→ Analyst rejects one of the algal_bloom reports (report {rumor_report_ids[0][:8]})…")
+    call(args.api, f"/analyst/reports/{rumor_report_ids[0]}/reject", method="POST",
+         token=token, json_body={"note": "Drill: no fish kill visible in follow-up, likely a false report"})
+
+    print("→ Checking the rumor tracker now flags the cluster (an analyst has contradicted a member report)…")
+    call(args.api, "/analyst/narratives/detect", method="POST", token=token)
+    narratives = call(args.api, "/analyst/narratives?limit=200", token=token)
+    narrative = next((n for n in narratives if set(rumor_report_ids) & set(n["report_ids"])), None)
+    assert narrative, (
+        "expected the algal_bloom cluster to be flagged as a narrative after a member report was rejected — "
+        "did detect_narratives' rejected-report contradiction path break?"
+    )
+    assert narrative["hazard_type"] == "algal_bloom"
+    assert narrative["rejected_report_count"] >= 1
+    assert narrative["status"] == "draft"
+    assert "Ennore" in narrative["message"]["en"]["standard"], (
+        "correction draft should name the nearest pilot location (Ennore) — did nearest_pilot_location wiring break?"
+    )
+    print(f"   narrative {narrative['id'][:8]}: {narrative['report_count']} report(s), "
+          f"{narrative['rejected_report_count']} rejected, draft_method={narrative['draft_method']}")
+    print(f"   draft correction: \"{narrative['message']['en']['standard'][:100]}\"")
+
+    print(f"→ Analyst approves the correction for narrative {narrative['id'][:8]}…")
+    approved = call(args.api, f"/analyst/narratives/{narrative['id']}/approve", method="POST", token=token)
+    assert approved["status"] == "approved"
+    print(f"   approved — {approved['delivered_count']} delivery attempt(s) fanned out")
+
+    print("→ Checking the correction actually reached the Ennore subscriber…")
+    # poll_deliveries() is hardcoded to the alerts path; narrative deliveries
+    # live at a different endpoint, so poll that one directly instead.
+    narrative_deliveries = []
+    for _ in range(10):
+        narrative_deliveries = call(args.api, f"/analyst/narratives/{narrative['id']}/deliveries", token=token)
+        if narrative_deliveries:
+            break
+        time.sleep(1.0)
+    assert narrative_deliveries, (
+        f"No delivery attempts recorded for narrative {narrative['id'][:8]} — "
+        "is deliver_narrative_correction wired correctly, or did the Ennore subscription not overlap the narrative's cells?"
+    )
+    d = narrative_deliveries[0]
+    print(f"   {len(narrative_deliveries)} delivery attempt(s), e.g. [{d['status']}] via {d['channel']} to {d['address']}")
 
     if active_alerts:
         print("→ Checking the delivery worker fanned the auto-proposed alert out to the drill subscriber…")

@@ -283,6 +283,74 @@ function Forecasts({ token }: { token: string }) {
   );
 }
 
+function Narratives({ token }: { token: string }) {
+  const fetcher = (path: string) => getJSON(path, token);
+  const { data: narratives, mutate } = useSWR("/analyst/narratives?limit=50", fetcher, {
+    refreshInterval: 30_000,
+  });
+
+  async function detectNow() {
+    await postJSON("/analyst/narratives/detect", {}, token);
+    mutate();
+  }
+
+  async function approve(id: string) {
+    await postJSON(`/analyst/narratives/${id}/approve`, {}, token);
+    mutate();
+  }
+
+  async function dismiss(id: string) {
+    await postJSON(`/analyst/narratives/${id}/dismiss`, {}, token);
+    mutate();
+  }
+
+  return (
+    <div className="card">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <h3 style={{ margin: 0 }}>Rumor tracker</h3>
+        <button onClick={detectNow}>Check now</button>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
+        {(narratives || []).map((n: any) => (
+          <div key={n.id} style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 10 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span>
+                <HazardChip hazard={n.hazard_type} /> {n.report_count} report(s){" "}
+                <span className="chip">{n.status}</span>{" "}
+                <span style={{ fontSize: 11, color: "var(--muted)" }}>({n.draft_method})</span>
+              </span>
+              {n.status === "draft" && (
+                <span style={{ display: "flex", gap: 6 }}>
+                  <button className="good" onClick={() => approve(n.id)}>Approve &amp; send</button>
+                  <button onClick={() => dismiss(n.id)}>Dismiss</button>
+                </span>
+              )}
+            </div>
+            <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 6 }}>"{n.representative_text}"</p>
+            <p style={{ fontSize: 12, marginTop: 4 }}>
+              {n.instrument_flat && "No corroborating instrument signal nearby. "}
+              {n.rejected_report_count > 0 &&
+                `${n.rejected_report_count} member report(s) already rejected by an analyst. `}
+            </p>
+            <p style={{ fontSize: 13, marginTop: 6 }}>{n.message?.en?.standard}</p>
+            {n.reviewed_by && (
+              <p style={{ fontSize: 11, color: "var(--muted)" }}>
+                reviewed by {n.reviewed_by}
+                {n.reviewed_at ? ` at ${new Date(n.reviewed_at).toLocaleString()}` : ""}
+              </p>
+            )}
+          </div>
+        ))}
+        {(narratives || []).length === 0 && (
+          <p style={{ color: "var(--muted)" }}>
+            No rumor narratives flagged — wait for the scheduled check or click "Check now".
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function AnalystDashboard() {
   const [token, setToken] = useState<string | null>(() =>
     typeof window === "undefined" ? null : localStorage.getItem("oceanping-analyst-token")
@@ -463,7 +531,9 @@ export default function AnalystDashboard() {
                 <tr key={a.id}>
                   <td><TierChip tier={a.tier} /></td>
                   <td><HazardChip hazard={a.hazard_type} /></td>
-                  <td style={{ maxWidth: 320 }}>{a.message?.en}</td>
+                  <td style={{ maxWidth: 320 }}>
+                    {typeof a.message?.en === "string" ? a.message.en : a.message?.en?.standard}
+                  </td>
                   <td>{a.issued_by || "automatic"}</td>
                   <td>{a.expires_at ? new Date(a.expires_at).toLocaleString() : "—"}</td>
                   <td>
@@ -479,6 +549,7 @@ export default function AnalystDashboard() {
         </div>
 
         <Forecasts token={token} />
+        <Narratives token={token} />
         <Sitreps token={token} />
       </div>
 

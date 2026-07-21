@@ -1,7 +1,8 @@
 # Phase 3 — Depth: Modeling, Ops Automation, Physical Edge, and the Service Split (months 7–10, gap plan)
 
-**Status: 🟡 in progress.** Milestones 1 (inundation model), 2 (auto-SITREPs), and 3
-(forecasting + propagation pre-alerts) built — see their "as built" sections below.
+**Status: 🟡 in progress.** Milestones 1 (inundation model), 2 (auto-SITREPs), 3
+(forecasting + propagation pre-alerts), and 4 (rumor tracker + alert drafting) built —
+see their "as built" sections below.
 Prereqs: phases 1–2 (alerts, delivery, satellite, routing), both done.
 **Independent items**: inundation model, auto-SITREPs, CoastSnap/IoT pilot, drill scale-up.
 
@@ -382,12 +383,140 @@ data-prep step, not credentials.
   browser automation tool available here) — verified via the live API
   responses and a clean production build instead.
 
+## Milestone 4 — as built
+
+- **New module `modules/narratives/`**, same `engine.py` (pure) / `service.py`
+  (DB I/O) / `router.py` (thin) split as every other module here, plus a
+  `narratives` table (the name the "Data model changes" line above already
+  reserved) and a `narrative_deliveries` log.
+- **Clustering is embedding-based, not spatial** — deliberately unlike
+  `nlp/dedup.py`'s incident merge. A rumor's defining shape is that the *same
+  claim* reappears in places that have nothing to do with each other, so
+  `engine.cluster_reports()` greedily groups `Report.embedding` vectors by
+  cosine similarity (reusing `nlp/dedup.py::cosine`, and the same
+  fetch-then-rank-in-Python approach `chat/service.py` uses — no pgvector
+  distance operator anywhere in this app yet) with no spatial gate at all. A
+  cluster under `MIN_NARRATIVE_REPORTS` (3) is dropped: one secondhand text
+  isn't a narrative spreading anywhere.
+- **A cluster is only persisted if it contradicts something real.**
+  `engine.is_contradiction()` takes two paths: an analyst has already
+  rejected a member report (the strongest signal available — a human looked
+  and disagreed), or the claimed hazard *has* an instrument signal
+  (`scoring/engine.py::HAZARD_VARIABLES`) and nothing active corroborates it
+  nearby. Hazards with no instrument signal at all (oil_spill, algal_bloom)
+  can only ever be flagged via the rejection path — "the instruments show
+  nothing" is meaningless for a hazard no instrument measures, and treating
+  it as evidence would have been the easy wrong answer here. An
+  unremarkable cluster of true reports never gets a row.
+- **The contradiction check reuses scoring's own query, not a copy of it**:
+  `scoring/service.py`'s private `_instrument_zscores(db, report)` was
+  generalized to a public `instrument_zscores_near(db, hazard_type, lat,
+  lon)` (the private one now delegates to it), so the rumor tracker asks
+  "does instrument data back this claim here" through scoring's seam rather
+  than reaching into `Station`/`StationAnomaly` itself — the module-boundary
+  rule this project holds everywhere.
+- **Corrections are drafted, never auto-sent.** `service._draft_correction()`
+  builds a deterministic per-language template (`engine.compose_correction`)
+  naming the hazard, the nearest pilot location, and *which* contradiction
+  applies, then optionally asks the Anthropic adapter
+  (`chat/llm.py::get_adapter().complete()`, the phase-2 seam the plan said to
+  extend) to smooth **only the English** wording under a system prompt
+  forbidding any factual change. No key configured, or the call fails →
+  `complete()` returns None and the template stands, with `draft_method`
+  recording which happened. Tamil/Telugu are never LLM-rewritten: those
+  strings are already flagged as unreviewed by a native speaker
+  (`ingest/report_conversation.py`), and making them *less* predictable than
+  a fixed template would be the wrong direction.
+- **Approval is the only path to delivery.** `POST /analyst/narratives/{id}/
+  approve` flips status, audit-logs the analyst, and fans out through the
+  real channel adapters (`delivery/adapters.get_adapter`) to every
+  Subscription geofenced over the narrative's cells — deliberately ignoring
+  `min_tier`, since "stand down, this wasn't real" is at least as relevant
+  to a subscriber as a new hazard alert. It is **not** written as an `Alert`
+  row: a correction isn't a hazard-tier proposal, and letting one sit in
+  `alerts` would put it in reach of `sync_incident_alert`'s tier-upgrade
+  logic, which could later overwrite it. Adapters only ever read `.message`/
+  `.tier`/`.hazard_type`, so a small duck-typed stand-in carries the
+  correction through them unchanged.
+- **Re-detection semantics** (each status means something different): a
+  `draft` match absorbs newly-joined reports rather than queueing a second
+  draft for the same rumor; a `dismissed` match is left alone forever (an
+  analyst already judged it — re-raising it every 30 minutes would be spam);
+  an `approved` match gets a *fresh* draft instead of being mutated, because
+  its correction has already gone out and a rumor resurging past it is new
+  information, not an edit to a sent message (same immutable-once-acted-on
+  discipline as a filed SITREP).
+- **Alert drafting, the milestone's other half**: `alerts/engine.py::
+  draft_message()` now returns `{lang: {"standard", "short"}}` for every
+  language in `SUPPORTED_LANGS` instead of `{"en": str}`, and a new
+  `message_text(message, lang, channel)` resolves one string at send time —
+  "short" for character-constrained channels (sms, whatsapp), "standard"
+  otherwise, falling back to English and then to whatever variant exists.
+  Hazard names come from `report_conversation.py`'s existing
+  `HAZARD_SPEECH_LABELS_BY_LANG` (the plain-text, no-emoji set, right for a
+  formal alert sentence) rather than a fourth hand-maintained copy. Tier
+  words stay English in every variant on purpose — that's the vocabulary
+  Indian disaster SMS already uses, and translating it risks inventing
+  terminology nobody recognizes. `delivery/adapters.py::_text_for` was the
+  only send-side change needed, since `Subscription.lang` and the
+  `alert.message[lang]` lookup were already there from phase 1;
+  `message_text` also transparently reads pre-milestone-4 rows whose
+  `message["en"]` is still a flat string, so no data migration was required.
+  Warning tier is unaffected — it remains analyst-only via `issue_warning()`.
+- **Fixed a real, pre-existing audit-chain race found by this milestone's
+  drill** (not introduced by it): `append_audit()` serialized writers with
+  `SELECT ... ORDER BY id DESC LIMIT 1 FOR UPDATE`, which doesn't work.
+  Under READ COMMITTED, Postgres chooses the row to lock *before* blocking
+  and, once unblocked, re-checks only that row instead of re-scanning for
+  rows inserted meanwhile — so a second writer wakes up still holding the
+  stale tail and computes the same `prev_hash`, silently forking the chain.
+  The dev database had two such forks, both between `forecast.generated`
+  entries ~30 ms apart, i.e. the sensor and propagation forecast scheduler
+  jobs (which share an interval and therefore fire together); adding the
+  narrative-detection job made it reproducible. Fixed with a
+  transaction-scoped advisory lock (`pg_advisory_xact_lock`) taken *before*
+  the tail read, plus a `UNIQUE` index on `audit_log.prev_hash` (migration
+  0014) so a fork can never persist even if the locking is ever wrong again
+  — two entries claiming one predecessor is exactly what a duplicate
+  prev_hash means. Migration 0014 refuses to run on an already-forked chain
+  and says so explicitly rather than recomputing the stored hashes:
+  a "repair" tool that rewrites hashes until a chain verifies is precisely
+  the capability a tamper-evident log exists to deny, so this project
+  doesn't ship one. Verified by hammering 40 report submissions across 12
+  concurrent workers (119 new audit entries, chain intact) and by two
+  consecutive full drill runs.
+- **Live-verified end-to-end** via `scripts/drill.py`, which now asserts both
+  branches of the contradiction rule against real data: the 16-report Marina
+  flood cluster is **not** flagged (the drill tide gauge is actively
+  anomalous, so repetition alone never makes it a rumor — the deterministic
+  negative case), while a 4-report near-duplicate algal_bloom cluster near
+  Ennore *is* flagged the moment an analyst rejects one member, drafts a
+  correction naming Ennore, and on approval delivers to the subscriber
+  geofenced there ("[sent] via sms"). 378 backend tests passing (up from
+  331).
+- **Not built** (explicit gaps, not oversights): clustering is a single
+  greedy pass per detection tick rather than incremental, so a narrative's
+  membership is recomputed from scratch each time (fine at pilot volume,
+  O(reports × clusters) — HDBSCAN over embeddings, as `geo/hotspots.py` does
+  over coordinates, is the upgrade path); no cross-language clustering check
+  (the multilingual sentence-transformer embeds Tamil and English text into
+  one space, so it *should* group a rumor spreading across languages, but
+  this environment has no real multilingual rumor corpus to verify that
+  against, so it's untested rather than claimed); no per-channel-length
+  variant beyond "standard"/"short" (no real 160-char SMS segmentation);
+  the LLM polish path is unexercised live since no `ANTHROPIC_API_KEY` is
+  configured here — `draft_method` reads `template` in every drill run, and
+  the `llm` branch is covered by unit tests only; and the new analyst
+  Narratives card wasn't visually verified in a browser (no browser
+  automation available here) — verified via live API responses and a clean
+  production build instead.
+
 ## Milestones
 
 1. Inundation model + alert/routing wiring (independent) — ✅ built, see above
 2. Auto-SITREPs (independent, high agency value) — ✅ built, see above
 3. Forecasting + propagation pre-alerts — ✅ built, see above
-4. Rumor tracker + alert drafting
+4. Rumor tracker + alert drafting — ✅ built, see above
 5. Mobile app with offline queue (mesh spike separate)
 6. CoastSnap + IoT pilot in one district
 7. Recovery module
@@ -407,5 +536,15 @@ data-prep step, not credentials.
   fitted front — 1.16 km/h, due north — with projected cells confirmed disjoint from the
   reported ones) and a backtested sensor forecast validated against the drill gauge's own
   real baseline in the same run.
+- Rumor tracker: repeated claims contradicting instrument state get clustered and flagged;
+  a claim instruments corroborate never does. ✅ `test_narratives_engine.py` +
+  `test_narratives_service.py`, plus both branches checked live in `scripts/drill.py`
+  (Marina's gauge-backed flood cluster stays unflagged; an algal_bloom cluster is flagged
+  once an analyst rejects a member, then approved and delivered to a real subscriber).
+- Alert drafting: per-tier/language/channel-length variants resolve correctly at send
+  time, including for rows predating the change. ✅ `test_alerts_engine.py`.
+- Audit chain under concurrency: parallel writers must never fork the chain.
+  ✅ `test_audit_chain.py` (lock-before-read ordering, no row-level tail lock, and the
+  UNIQUE prev_hash backstop), plus a live 12-worker concurrent-write check.
 - Split: replay identical drill on monolith vs. split deployment → identical end state
   (reports, incidents, alerts, audit chain length).

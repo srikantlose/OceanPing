@@ -53,13 +53,17 @@ def _coherence_count(db: Session, report: Report) -> int:
     )
 
 
-def _instrument_zscores(db: Session, report: Report) -> list[dict]:
-    """Active, hazard-consistent anomalies at stations within the radius."""
+def instrument_zscores_near(db: Session, hazard_type: str, lat: float, lon: float) -> list[dict]:
+    """Active, hazard-consistent anomalies at stations within the radius of a
+    point. Generalized from a single report's location so other modules (the
+    rumor tracker's contradiction check, in particular) can ask "does
+    instrument data corroborate this hazard claim here" without querying
+    Station/StationAnomaly directly themselves."""
     settings = get_settings()
-    allowed = engine.HAZARD_VARIABLES.get(report.hazard_type, set())
+    allowed = engine.HAZARD_VARIABLES.get(hazard_type, set())
     if not allowed:
         return []
-    point = func.ST_SetSRID(func.ST_MakePoint(report.lon, report.lat), 4326)
+    point = func.ST_SetSRID(func.ST_MakePoint(lon, lat), 4326)
     nearby_ids = [
         row[0]
         for row in db.execute(
@@ -84,6 +88,10 @@ def _instrument_zscores(db: Session, report: Report) -> list[dict]:
         {"station_id": a.station_id, "variable": a.variable, "zscore": round(a.zscore, 3)}
         for a in anomalies
     ]
+
+
+def _instrument_zscores(db: Session, report: Report) -> list[dict]:
+    return instrument_zscores_near(db, report.hazard_type, report.lat, report.lon)
 
 
 def _satellite_observations(db: Session, report: Report) -> list[dict]:

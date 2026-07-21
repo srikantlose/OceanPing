@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.core.db import get_db
 from app.core.security import require_analyst
 from app.models import Alert, AlertDelivery, Incident, Subscription
+from app.modules.alerts.engine import message_text
 from app.modules.alerts.service import expire_alert, issue_warning
 from app.modules.geo.h3utils import cell_polygon
 
@@ -121,7 +122,7 @@ def public_alerts(db: Session = Depends(get_db)) -> dict:
                     "id": str(a.id),
                     "tier": a.tier,
                     "hazard_type": a.hazard_type,
-                    "message": a.message.get("en", ""),
+                    "message": message_text(a.message, "en", "push"),
                     "issued_by": a.issued_by or "automatic",
                     "predicted_flooded_cells_count": len(a.predicted_flooded_cells or []),
                     "projected_cells_count": len(a.projected_cells or []),
