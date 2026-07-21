@@ -156,7 +156,7 @@ export default function MapView() {
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
 
     map.on("load", () => {
-      for (const id of ["hotspots", "alerts", "incident-cells", "incidents", "reports", "stations", "shelters", "route", "inundation"]) {
+      for (const id of ["hotspots", "alerts", "incident-cells", "incidents", "reports", "stations", "shelters", "route", "inundation", "propagation"]) {
         map.addSource(id, { type: "geojson", data: EMPTY_FC as any });
       }
 
@@ -200,6 +200,19 @@ export default function MapView() {
           "line-color": tierMatch(),
           "line-width": ["match", ["get", "tier"], "warning", 3, 2],
         },
+      });
+
+      map.addLayer({
+        id: "propagation-fill",
+        type: "fill",
+        source: "propagation",
+        paint: { "fill-color": "#e5a339", "fill-opacity": 0.08 },
+      });
+      map.addLayer({
+        id: "propagation-line",
+        type: "line",
+        source: "propagation",
+        paint: { "line-color": "#e5a339", "line-width": 1.5, "line-dasharray": [2, 1.5] },
       });
 
       map.addLayer({
@@ -308,13 +321,14 @@ export default function MapView() {
       });
 
       const refresh = async () => {
-        const [hotspots, alerts, incidents, reports, stations, shelters] = await Promise.all([
+        const [hotspots, alerts, incidents, reports, stations, shelters, propagation] = await Promise.all([
           fetchFC("/map/hotspots"),
           fetchFC("/map/alerts"),
           fetchFC("/map/incidents"),
           fetchFC("/map/reports"),
           fetchFC("/map/stations"),
           fetchFC("/map/shelters"),
+          fetchFC("/map/propagation"),
         ]);
         const cells = {
           type: "FeatureCollection",
@@ -335,6 +349,7 @@ export default function MapView() {
         (map.getSource("reports") as any)?.setData(reports);
         (map.getSource("stations") as any)?.setData(stations);
         (map.getSource("shelters") as any)?.setData(shelters);
+        (map.getSource("propagation") as any)?.setData(propagation);
       };
       refresh();
       const timer = setInterval(refresh, REFRESH_MS);
@@ -350,6 +365,7 @@ export default function MapView() {
         const p: any = e.features?.[0]?.properties;
         if (!p) return;
         const series = typeof p.series === "string" ? JSON.parse(p.series) : p.series;
+        const forecast = typeof p.forecast === "string" ? JSON.parse(p.forecast) : p.forecast;
         const anomalies =
           typeof p.anomalies === "string" ? JSON.parse(p.anomalies) : p.anomalies;
         const firstVar = Object.keys(series || {})[0];
@@ -364,7 +380,18 @@ export default function MapView() {
           `<div class="popup-title">${p.name}</div>
            <div class="popup-sub">${p.provider}</div>
            ${anomalyHtml}
-           ${firstVar ? `<div class="popup-sub" style="margin-top:6px">${firstVar}</div>${sparklineSVG(series[firstVar])}` : `<div class="spark-caption">no readings yet</div>`}`
+           ${firstVar ? `<div class="popup-sub" style="margin-top:6px">${firstVar}</div>${sparklineSVG(series[firstVar], (forecast || {})[firstVar] || [])}` : `<div class="spark-caption">no readings yet</div>`}`
+        );
+      });
+
+      map.on("click", "propagation-fill", (e) => {
+        const p: any = e.features?.[0]?.properties;
+        if (!p) return;
+        popup(
+          e.lngLat,
+          `<div class="popup-title" style="color:#e5a339">Projected — ${HAZARD_LABELS[p.hazard_type] || p.hazard_type}</div>
+           <div class="popup-sub">Hazard front forecast, not yet reported here</div>
+           <div style="font-size:12px">~${p.speed_kmh ?? "?"} km/h · ${p.horizon_hours}h ahead</div>`
         );
       });
 
@@ -427,7 +454,7 @@ export default function MapView() {
         );
       });
 
-      for (const layer of ["stations-circles", "incidents-circles", "reports-circles", "alerts-fill", "shelters-circle", "inundation-fill"]) {
+      for (const layer of ["stations-circles", "incidents-circles", "reports-circles", "alerts-fill", "shelters-circle", "inundation-fill", "propagation-fill"]) {
         map.on("mouseenter", layer, () => (map.getCanvas().style.cursor = "pointer"));
         map.on("mouseleave", layer, () => (map.getCanvas().style.cursor = ""));
       }
@@ -496,6 +523,10 @@ export default function MapView() {
         <div className="legend-row">
           <span className="legend-swatch" style={{ background: "#2a7fd6" }} />
           Predicted flooding (bathtub model)
+        </div>
+        <div className="legend-row">
+          <span className="legend-swatch ring" style={{ borderColor: "#e5a339" }} />
+          Projected — hazard front forecast (1-3h ahead)
         </div>
 
         <h4 style={{ marginTop: 8 }}>Inundation what-if</h4>

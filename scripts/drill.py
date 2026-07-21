@@ -14,6 +14,10 @@ What it does:
      the analyst, and checks the audit chain is intact.
   6. Generates and files an auto-SITREP, checking its counts against an
      independently recomputed tally from /analyst/reports.
+  7. Injects a directional report sequence near Kasimedu to exercise hazard-
+     front propagation forecasting, and backtests a sensor forecast against
+     the drill gauge's own calm baseline so the full generate-then-validate
+     loop can be checked immediately instead of waiting on real time.
 """
 import argparse
 import json
@@ -29,6 +33,20 @@ from datetime import datetime, timedelta, timezone
 MARINA = (13.0500, 80.2824)  # Chennai Marina Beach
 DRILL_STATION = {"id": "drill-chennai-tide", "name": "Drill Tide Gauge — Chennai Marina",
                  "lat": 13.06, "lon": 80.30}
+
+# Hazard-front propagation drill (phase 3, milestone 3): a time-ordered report
+# sequence walking due north from south of Kasimedu fishing harbour, well
+# clear of the Marina cluster above so the two never merge into one incident.
+FRONT_ORIGIN = (13.100, 80.298)
+FRONT_REPORT_COUNT = 6
+FRONT_STEP_MINUTES = 20
+FRONT_LAT_STEP = 0.0035  # ~0.39 km/step — comfortably within the H3 1-ring merge radius
+FRONT_TEXT = "sea water rising along the coast road, moving up from the harbour"
+
+# Backtests a sensor forecast far enough in the past that its full horizon has
+# already elapsed in real time by the time /drill/tick runs validate_forecasts —
+# lets the drill exercise the whole generate-then-validate loop immediately.
+BACKTEST_HOURS_AGO = 3.2
 
 REPORT_TEXTS = [
     ("coastal_flooding", "Sea water is entering the streets near Marina, houses starting to flood"),
@@ -152,11 +170,36 @@ def main() -> None:
         print(f"   [{rep['status']:>11}] conf={rep['confidence']:.2f} "
               f"{rep['hazard_type']:<17} lang={rep['lang']:<5} \"{text[:48]}…\"")
 
-    print("→ Forcing pipeline tick (anomaly detection + satellite poll + PFZ refresh + rescore)…")
+    print("→ Injecting a directional report sequence near Kasimedu (hazard-front propagation drill)…")
+    front_reports = [
+        {
+            "lat": FRONT_ORIGIN[0] + FRONT_LAT_STEP * i,
+            "lon": FRONT_ORIGIN[1],
+            "hazard_type": "coastal_flooding",
+            "client_id": f"drill-front-{i}",
+            "text": FRONT_TEXT,
+            "created_at": (now - timedelta(minutes=FRONT_STEP_MINUTES * (FRONT_REPORT_COUNT - 1 - i))).isoformat(),
+        }
+        for i in range(FRONT_REPORT_COUNT)
+    ]
+    call(args.api, "/drill/inject-reports", method="POST", token=token, json_body={"reports": front_reports})
+    print(f"   injected {len(front_reports)} time-ordered reports moving north from {FRONT_ORIGIN}")
+
+    print("→ Backtesting a sensor forecast against the drill gauge's own calm baseline "
+          "(so it validates immediately instead of waiting on real time)…")
+    backtest = call(args.api, "/drill/backtest-forecast", method="POST", token=token,
+                     json_body={"station_id": DRILL_STATION["id"], "variable": "water_level",
+                                "hours_ago": BACKTEST_HOURS_AGO})
+    print(f"   forecast {backtest['id'][:8]} fit as of {BACKTEST_HOURS_AGO}h ago, "
+          f"{len(backtest['content']['points'])} point(s) projected")
+
+    print("→ Forcing pipeline tick (anomaly detection + satellite poll + PFZ refresh + rescore + forecasts)…")
     tick = call(args.api, "/drill/tick", method="POST", token=token)
     print(f"   rescored {tick['rescored_reports']} reports, "
           f"{tick['satellite_observations']} satellite observation(s) recorded, "
-          f"{tick['pfz_zones']} PFZ zone(s) (re)issued")
+          f"{tick['pfz_zones']} PFZ zone(s) (re)issued, "
+          f"{tick['sensor_forecasts']} sensor forecast(s), {tick['propagation_forecasts']} propagation forecast(s), "
+          f"{tick['validated_forecasts']} forecast(s) validated")
 
     print("→ Post-tick state:")
     reports = call(args.api, "/analyst/reports?limit=20", token=token)
@@ -222,6 +265,61 @@ def main() -> None:
     )
     print(f"   [{flood_wired_alert['tier']:>8}] {flood_wired_alert['hazard_type']} alert carries "
           f"{len(flood_wired_alert['predicted_flooded_cells'])} predicted flooded cell(s) from the live gauge reading")
+
+    print("→ Checking the hazard-front propagation forecast for the directional report sequence…")
+    all_incidents = call(args.api, "/analyst/incidents", token=token)
+    # >= not == : rerunning the drill against an already-populated dev DB adds
+    # another FRONT_REPORT_COUNT reports to the same incident (same location,
+    # same text), rather than starting a fresh one each time.
+    front_candidates = [
+        i for i in all_incidents
+        if i["hazard_type"] == "coastal_flooding" and i["report_count"] >= FRONT_REPORT_COUNT
+        and FRONT_ORIGIN[0] - 0.01 <= i["centroid"][0] <= FRONT_ORIGIN[0] + FRONT_LAT_STEP * FRONT_REPORT_COUNT + 0.01
+    ]
+    assert len(front_candidates) == 1, (
+        f"expected exactly one incident merging the directional reports near Kasimedu, "
+        f"found {len(front_candidates)} — did the reports land too far apart to pass the H3 1-ring merge check, "
+        "or merge into an unrelated incident?"
+    )
+    front_incident = front_candidates[0]
+    propagation_forecasts = call(args.api, "/analyst/forecasts?kind=propagation&limit=50", token=token)
+    front_forecast = next((f for f in propagation_forecasts if f["subject_id"] == front_incident["id"]), None)
+    assert front_forecast, (
+        f"expected a propagation forecast for incident {front_incident['id'][:8]} — "
+        "did /drill/tick's generate_propagation_forecasts run, or was the fitted front's speed below the noise floor?"
+    )
+    front = front_forecast["content"]["front"]
+    assert front["speed_kmh"] > 0, "fitted front has zero speed — fit_front should reject a stationary sequence, not return one"
+    assert -45 <= front["bearing_deg"] <= 45 or front["bearing_deg"] >= 315, (
+        f"expected a roughly northward bearing for a due-north-moving report sequence, got {front['bearing_deg']}°"
+    )
+    origin_cells = set(front_incident["h3_cells"])
+    projected_cells = {c for cells in front_forecast["content"]["projected"].values() for c in cells}
+    assert projected_cells, "expected at least one cell projected ahead of the front"
+    assert projected_cells.isdisjoint(origin_cells), (
+        "projected cells should lie ahead of the front, not among the already-reported cells"
+    )
+    print(f"   incident {front_incident['id'][:8]} ({FRONT_REPORT_COUNT} merged reports) → front speed "
+          f"{front['speed_kmh']} km/h, bearing {front['bearing_deg']}°, {len(projected_cells)} cell(s) "
+          f"projected ahead of the {len(origin_cells)} reported cell(s) — an unreported village cell, pre-alerted")
+
+    print("→ Checking the backtested sensor forecast validated against its own real baseline…")
+    sensor_forecasts = call(args.api, "/analyst/forecasts?kind=sensor&limit=50", token=token)
+    validated = next((f for f in sensor_forecasts if f["id"] == backtest["id"]), None)
+    assert validated, "backtested forecast disappeared — did /drill/tick's validate_forecasts run?"
+    assert validated["validated_at"], (
+        f"expected the backtested forecast's full horizon (fit as of {BACKTEST_HOURS_AGO}h ago) to have already "
+        "elapsed and been scored by now"
+    )
+    assert validated["validation"]["scored_points"] > 0, (
+        "backtested forecast was validated but scored zero points against real readings"
+    )
+    print(f"   forecast {validated['id'][:8]}: {validated['validation']['scored_points']} point(s) scored, "
+          f"mean abs error {validated['validation']['mean_abs_error']} m vs. the drill gauge's real baseline")
+
+    accuracy = call(args.api, "/forecasts/accuracy")
+    assert accuracy["sensor"], "expected the public accuracy endpoint to show at least one scored sensor forecast"
+    print(f"   /forecasts/accuracy (public, per pilot location): {accuracy['sensor'][0]}")
 
     if active_alerts:
         print("→ Checking the delivery worker fanned the auto-proposed alert out to the drill subscriber…")

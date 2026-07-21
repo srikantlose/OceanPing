@@ -189,6 +189,22 @@ class Settings(BaseSettings):
     # overlap regardless of this setting.
     sitrep_period_hours: float = 1.0
 
+    # Forecasting (phase 3, milestone 3): harmonic-trend sensor forecasts and
+    # hazard-front propagation forecasts, both regenerated on this cadence —
+    # see modules/forecast/. Deliberately much slower than erddap_poll_minutes
+    # or rescore_minutes: a 1-3h-horizon forecast doesn't need to be refit
+    # every couple of minutes, and doing so would just relearn the same trend
+    # from near-identical data.
+    forecast_interval_minutes: int = 30
+    # How much trailing history a sensor forecast fits its harmonic-trend
+    # regression against — same window as the anomaly baseline.
+    forecast_sensor_baseline_days: float = 7.0
+    forecast_sensor_horizon_hours: float = 3.0
+    forecast_sensor_step_minutes: int = 30
+    # An incident still receives new propagation forecasts for this long after
+    # its last report — mirrors incident_window_hours.
+    forecast_propagation_incident_hours: float = 6.0
+
     class Config:
         env_file = ".env"
         extra = "ignore"

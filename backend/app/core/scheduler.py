@@ -25,6 +25,11 @@ def _job(fn):
 
 def build_scheduler() -> BackgroundScheduler:
     from app.modules.fisherman.service import refresh_pfz_advisories
+    from app.modules.forecast.service import (
+        generate_propagation_forecasts,
+        generate_sensor_forecasts,
+        validate_forecasts,
+    )
     from app.modules.satellite.service import poll_satellite
     from app.modules.scoring.service import rescore_recent
     from app.modules.sensors.service import detect_anomalies, poll_all
@@ -44,8 +49,16 @@ def build_scheduler() -> BackgroundScheduler:
                       id="pfz_refresh")
     scheduler.add_job(_job(generate_sitrep), "interval", hours=settings.sitrep_period_hours,
                       id="sitrep_generate")
+    scheduler.add_job(_job(generate_sensor_forecasts), "interval", minutes=settings.forecast_interval_minutes,
+                      id="forecast_sensor_generate")
+    scheduler.add_job(_job(generate_propagation_forecasts), "interval", minutes=settings.forecast_interval_minutes,
+                      id="forecast_propagation_generate")
+    scheduler.add_job(_job(validate_forecasts), "interval", minutes=settings.forecast_interval_minutes,
+                      id="forecast_validate")
     # One-shot initial jobs so the map/sea page have data right after startup.
     scheduler.add_job(_job(poll_all), id="erddap_poll_initial")
     scheduler.add_job(_job(refresh_pfz_advisories), id="pfz_refresh_initial")
     scheduler.add_job(_job(generate_sitrep), id="sitrep_generate_initial")
+    scheduler.add_job(_job(generate_sensor_forecasts), id="forecast_sensor_generate_initial")
+    scheduler.add_job(_job(generate_propagation_forecasts), id="forecast_propagation_generate_initial")
     return scheduler

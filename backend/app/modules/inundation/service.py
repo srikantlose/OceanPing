@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models import ElevationCell, SensorReading
+from app.modules.forecast.service import latest_sensor_forecast_point
 from app.modules.geo.h3utils import cell_polygon
 from app.modules.inundation import engine
 
@@ -68,3 +69,33 @@ def predicted_flooded_cells(db: Session) -> set[str]:
         return set()
     elevations = load_elevation_table(db)
     return set(engine.flooded_cells(elevations, level))
+
+
+def forecast_flooded_cells_geojson(db: Session, hours_ahead: float) -> dict | None:
+    """Bathtub model applied to a *forecasted* future water level (phase 3,
+    milestone 3) instead of the current instantaneous reading — closes the
+    milestone-1 gap of only ever using "now." None if there's no sensor
+    forecast yet for the reference variable to draw from (see
+    modules/forecast/service.py — same data-gated-degrade pattern as
+    predicted_flooded_cells above)."""
+    settings = get_settings()
+    point = latest_sensor_forecast_point(db, settings.inundation_reference_variable, hours_ahead)
+    if point is None:
+        return None
+    elevations = load_elevation_table(db)
+    flooded = engine.flooded_cells(elevations, point["value"])
+    features = [
+        {
+            "type": "Feature",
+            "geometry": {"type": "Polygon", "coordinates": [cell_polygon(cell)]},
+            "properties": {"h3_cell": cell, "depth_m": depth},
+        }
+        for cell, depth in flooded.items()
+    ]
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+        "water_level_m": point["value"],
+        "forecast_time": point["time"],
+        "cell_count": len(flooded),
+    }

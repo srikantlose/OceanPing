@@ -211,6 +211,78 @@ function Sitreps({ token }: { token: string }) {
   );
 }
 
+function Forecasts({ token }: { token: string }) {
+  const fetcher = (path: string) => getJSON(path, token);
+  const { data: forecasts, mutate } = useSWR("/analyst/forecasts?limit=20", fetcher, {
+    refreshInterval: 30_000,
+  });
+  const { data: accuracy } = useSWR("/forecasts/accuracy", fetcher, { refreshInterval: 60_000 });
+
+  async function generateNow() {
+    await postJSON("/analyst/forecasts/generate", {}, token);
+    mutate();
+  }
+
+  return (
+    <div className="card">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <h3 style={{ margin: 0 }}>Forecasts</h3>
+        <button onClick={generateNow}>Generate now</button>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
+        {(forecasts || []).map((f: any) => (
+          <div key={f.id} style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 10 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span>
+                <span className="chip">{f.kind}</span>{" "}
+                <strong>{f.subject_type === "station" ? f.content.variable : f.hazard_type}</strong>
+                {" · "}
+                {new Date(f.generated_at).toLocaleString()}
+              </span>
+              {f.validated_at ? (
+                <span style={{ fontSize: 12, color: "var(--muted)" }}>
+                  {f.kind === "sensor"
+                    ? `MAE ${f.validation?.mean_abs_error ?? "—"}`
+                    : `hit rate ${f.validation?.hit_rate ?? "—"}`}
+                </span>
+              ) : (
+                <span style={{ fontSize: 12, color: "var(--muted)" }}>not yet validated</span>
+              )}
+            </div>
+            {f.kind === "propagation" && (
+              <p style={{ fontSize: 13, marginTop: 6 }}>
+                {f.content.location} · front speed {f.content.front?.speed_kmh} km/h, bearing {f.content.front?.bearing_deg}°
+                {" — "}
+                {Object.values(f.content.projected || {}).reduce((n: number, c: any) => n + c.length, 0)} projected cell(s)
+              </p>
+            )}
+          </div>
+        ))}
+        {(forecasts || []).length === 0 && (
+          <p style={{ color: "var(--muted)" }}>
+            No forecasts yet — wait for the scheduled job or click "Generate now".
+          </p>
+        )}
+      </div>
+      {accuracy && (accuracy.sensor.length > 0 || accuracy.propagation.length > 0) && (
+        <div style={{ marginTop: 14 }}>
+          <h4 style={{ margin: "0 0 6px" }}>How right were we?</h4>
+          {accuracy.sensor.map((s: any, i: number) => (
+            <div key={i} style={{ fontSize: 12, color: "var(--muted)" }}>
+              {s.location} · {s.variable}: mean error {s.mean_abs_error} over {s.n_forecasts} forecast(s)
+            </div>
+          ))}
+          {accuracy.propagation.map((p: any, i: number) => (
+            <div key={i} style={{ fontSize: 12, color: "var(--muted)" }}>
+              {p.location} · {p.hazard_type}: hit rate {p.mean_hit_rate} over {p.n_forecasts} forecast(s)
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function AnalystDashboard() {
   const [token, setToken] = useState<string | null>(() =>
     typeof window === "undefined" ? null : localStorage.getItem("oceanping-analyst-token")
@@ -406,6 +478,7 @@ export default function AnalystDashboard() {
           </table>
         </div>
 
+        <Forecasts token={token} />
         <Sitreps token={token} />
       </div>
 

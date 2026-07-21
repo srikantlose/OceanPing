@@ -32,14 +32,23 @@ _LOOKUP_RETRY_DELAY_SECONDS = 0.2
 
 def _matches(alert: Alert, sub: Subscription) -> bool:
     """Pure predicate: does this subscription want this alert? Split out from
-    the DB query below so it's unit-testable without a live database."""
+    the DB query below so it's unit-testable without a live database.
+
+    Geofence matching covers both the confirmed incident area (h3_cells) and
+    the hazard-front propagation forecast's projected cells (phase 3,
+    milestone 3) — a subscriber directly ahead of a moving front gets the
+    same advisory/watch alert before they've reported anything themselves.
+    projected_cells is purely additive here; it never affects routing
+    exclusion or the confirmed-incident map layer (see models.py's comment
+    on Alert.projected_cells)."""
     if engine.TIER_RANK.get(sub.min_tier, 0) > engine.TIER_RANK[alert.tier]:
         return False
-    return bool(set(sub.h3_cells or []) & set(alert.h3_cells or []))
+    alert_cells = set(alert.h3_cells or []) | set(alert.projected_cells or [])
+    return bool(set(sub.h3_cells or []) & alert_cells)
 
 
 def _matching_subscriptions(db: Session, alert: Alert) -> list[Subscription]:
-    if not alert.h3_cells:
+    if not alert.h3_cells and not alert.projected_cells:
         return []
     subs = db.scalars(select(Subscription)).all()
     return [s for s in subs if _matches(alert, s)]

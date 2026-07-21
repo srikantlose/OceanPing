@@ -54,6 +54,7 @@ def test_sync_incident_alert_attaches_predicted_flooded_cells(monkeypatch):
     monkeypatch.setattr(service, "append_audit", lambda *a, **k: None)
     monkeypatch.setattr(service, "enqueue_alert", lambda alert_id: None)
     monkeypatch.setattr(service, "_flooded_cells_for", lambda db, hazard_type: ["cell_x", "cell_y"])
+    monkeypatch.setattr(service, "_projected_cells_for", lambda db, incident: [])
     incident = SimpleNamespace(
         id="inc-1", status="corroborated", hazard_type="coastal_flooding", report_count=5,
         h3_cells=["cell_1"],
@@ -68,6 +69,7 @@ def test_sync_incident_alert_refreshes_predicted_flooded_cells_on_tier_upgrade(m
     monkeypatch.setattr(service, "append_audit", lambda *a, **k: None)
     monkeypatch.setattr(service, "enqueue_alert", lambda alert_id: None)
     monkeypatch.setattr(service, "_flooded_cells_for", lambda db, hazard_type: ["cell_new"])
+    monkeypatch.setattr(service, "_projected_cells_for", lambda db, incident: [])
     incident = SimpleNamespace(
         id="inc-1", status="corroborated", hazard_type="coastal_flooding", report_count=5,
         h3_cells=["cell_1"],
@@ -75,11 +77,26 @@ def test_sync_incident_alert_refreshes_predicted_flooded_cells_on_tier_upgrade(m
     )
     active = SimpleNamespace(
         id="alert-1", tier="advisory", issued_by=None, message={}, h3_cells=[],
-        predicted_flooded_cells=["cell_old"],
+        predicted_flooded_cells=["cell_old"], projected_cells=["cell_old_proj"],
     )
     alert = service.sync_incident_alert(_AlertDb(active_alert=active), incident)
     assert alert is active
     assert alert.predicted_flooded_cells == ["cell_new"]
+
+
+def test_sync_incident_alert_attaches_projected_cells(monkeypatch):
+    monkeypatch.setattr(service, "get_settings", lambda: SimpleNamespace(alert_min_watch_reporters=3))
+    monkeypatch.setattr(service, "append_audit", lambda *a, **k: None)
+    monkeypatch.setattr(service, "enqueue_alert", lambda alert_id: None)
+    monkeypatch.setattr(service, "_flooded_cells_for", lambda db, hazard_type: [])
+    monkeypatch.setattr(service, "_projected_cells_for", lambda db, incident: ["cell_ahead"])
+    incident = SimpleNamespace(
+        id="inc-1", status="corroborated", hazard_type="coastal_flooding", report_count=5,
+        h3_cells=["cell_1"],
+        reports=[SimpleNamespace(reporter_id="r1", confidence_components={"instrument": 0.8})],
+    )
+    alert = service.sync_incident_alert(_AlertDb(active_alert=None), incident)
+    assert alert.projected_cells == ["cell_ahead"]
 
 
 def test_issue_warning_attaches_predicted_flooded_cells(monkeypatch):
@@ -87,6 +104,7 @@ def test_issue_warning_attaches_predicted_flooded_cells(monkeypatch):
     monkeypatch.setattr(service, "append_audit", lambda *a, **k: None)
     monkeypatch.setattr(service, "enqueue_alert", lambda alert_id: None)
     monkeypatch.setattr(service, "_flooded_cells_for", lambda db, hazard_type: ["cell_z"])
+    monkeypatch.setattr(service, "_projected_cells_for", lambda db, incident: [])
     incident = SimpleNamespace(id="inc-2", hazard_type="storm_surge", report_count=8, h3_cells=["cell_2"])
     alert = service.issue_warning(_AlertDb(active_alert=None), incident, analyst="alice")
     assert alert.tier == "warning"

@@ -203,6 +203,14 @@ class Alert(Base):
     # what an already-issued alert claimed. Empty when there's no fresh gauge
     # reading to base a prediction on (see inundation/service.py).
     predicted_flooded_cells: Mapped[list] = mapped_column(JSONB, default=list)
+    # Propagation-forecast pre-alert cells (phase 3, milestone 3): the nearest-
+    # horizon cell set from the incident's freshest hazard-front forecast (see
+    # modules/forecast/), i.e. where the hazard is projected to reach next,
+    # ahead of any actual report. Same fixed-snapshot semantics as
+    # predicted_flooded_cells. Additive to delivery targeting only — never
+    # used for routing exclusion or the confirmed-incident map layer, both of
+    # which stay tied to real reports/gauge readings, not a forecast.
+    projected_cells: Mapped[list] = mapped_column(JSONB, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -369,10 +377,37 @@ class Sitrep(Base):
     filed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class Forecast(Base):
+    """Short-horizon prediction (phase 3, milestone 3) — either a per-
+    station/variable sensor forecast (harmonic-trend regression over real
+    readings) or a hazard-front propagation forecast (linear front-velocity
+    extrapolation of a real incident's time-ordered report cluster). See
+    modules/forecast/engine.py for why each is deliberately simple rather
+    than e.g. Prophet/ANUGA. `content` holds the kind-specific projected
+    points/cells — never invented, always derived from real DB history.
+    `validation` stays null until validate_forecasts() finds that reality has
+    caught up to what this forecast predicted, then it's filled in once and
+    never edited again — the same immutable-after-the-fact discipline as a
+    filed SITREP."""
+    __tablename__ = "forecasts"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=new_uuid)
+    kind: Mapped[str] = mapped_column(String(16), index=True)  # sensor | propagation
+    subject_type: Mapped[str] = mapped_column(String(16))  # station | incident
+    subject_id: Mapped[str] = mapped_column(String(64), index=True)
+    hazard_type: Mapped[str | None] = mapped_column(String(32), nullable=True)  # propagation only
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    horizon_hours: Mapped[float] = mapped_column(Float)
+    content: Mapped[dict] = mapped_column(JSONB, default=dict)
+    validation: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 Index("ix_reports_cell_time", Report.h3_cell, Report.created_at)
 Index("ix_readings_station_var_time", SensorReading.station_id, SensorReading.variable, SensorReading.time)
 Index("ix_subscriptions_channel_address", Subscription.channel, Subscription.address, unique=True)
 Index("ix_alerts_incident_status", Alert.incident_id, Alert.status)
 Index("ix_training_examples_outcome", TrainingExample.outcome)
+Index("ix_forecasts_kind_subject", Forecast.kind, Forecast.subject_id)
 Index("ix_satellite_observations_incident_recipe", SatelliteObservation.incident_id, SatelliteObservation.recipe)
 Index("ix_pfz_advisories_sector_valid", PfzAdvisory.sector, PfzAdvisory.valid_until)

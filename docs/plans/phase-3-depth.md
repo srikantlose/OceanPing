@@ -1,8 +1,8 @@
 # Phase 3 — Depth: Modeling, Ops Automation, Physical Edge, and the Service Split (months 7–10, gap plan)
 
-**Status: 🟡 in progress.** Milestones 1 (inundation model) and 2 (auto-SITREPs) built —
-see their "as built" sections below. Prereqs: phases 1–2 (alerts, delivery, satellite,
-routing), both done.
+**Status: 🟡 in progress.** Milestones 1 (inundation model), 2 (auto-SITREPs), and 3
+(forecasting + propagation pre-alerts) built — see their "as built" sections below.
+Prereqs: phases 1–2 (alerts, delivery, satellite, routing), both done.
 **Independent items**: inundation model, auto-SITREPs, CoastSnap/IoT pilot, drill scale-up.
 
 ## Goals
@@ -259,11 +259,134 @@ data-prep step, not credentials.
   live API responses (including the two-generation hotspot-movement check
   above) and a successful Next.js dev-server render instead.
 
+## Milestone 3 — as built
+
+- **New module `modules/forecast/`**, same `engine.py` (pure) / `service.py`
+  (DB I/O) / `router.py` (thin) split as every other module here. Two
+  independent forecast kinds share one `forecasts` table (`kind` discriminator
+  — `sensor` | `propagation`), the same pattern `sitreps`/`alerts` use for a
+  JSONB `content` payload plus a `validation` field filled in later.
+- **Sensor forecasting deliberately isn't Prophet**, despite the plan naming
+  it: harmonic-trend least-squares regression (linear trend + M2 semidiurnal
+  12.42h / K1 diurnal 23.93h tidal constituents, a single `numpy.linalg.lstsq`
+  call) instead. Prophet's Stan-compilation backend is heavy for a pilot
+  deployment, and its daily/weekly seasonal components don't match this
+  data's actual ~12.4h period — real short-horizon tide/wave nowcasting
+  overwhelmingly uses harmonic constituent analysis anyway, so this is the
+  more defensible choice here, not just the lighter one (same class of call
+  as the bathtub model replacing ANUGA in milestone 1).
+  `engine.py::fit_sensor_forecast()` is a pure function (`MIN_SENSOR_POINTS =
+  20` floor, same data-gated-degrade pattern as anomaly detection's
+  baseline); `service.py::generate_sensor_forecast()` fits it against a
+  station/variable's trailing history (`forecast_sensor_baseline_days`, 7)
+  and stores the projected points.
+- **Hazard-front propagation**: `engine.py::fit_front()` fits a
+  constant-velocity front (least-squares in a local km-projected plane,
+  reusing the same equirectangular-projection convention as
+  `geo/hotspots.py`) to an incident's own time-ordered report sequence — the
+  simplest kinematically-defensible model, same "upgrade path noted, not
+  built" honesty as the bathtub model's missing flow routing.
+  `engine.py::project_front_cells()` translates the incident's current H3
+  cells forward by the fitted velocity at 1/2/3h horizons
+  (`service.PROPAGATION_HORIZONS_HOURS`) — the plan's own "project 1-3h
+  ahead" framing. Both floors (`MIN_FRONT_POINTS = 4`, `MIN_FRONT_SPEED_KMH =
+  0.1`) mean a tightly-jittered, non-moving report cluster (most incidents)
+  correctly yields no propagation forecast at all.
+- **Pre-alert wiring, without touching routing or the confirmed-incident
+  layer**: a new `Alert.projected_cells` column (mirrors
+  `predicted_flooded_cells`'s fixed-snapshot semantics exactly) is set
+  whenever `alerts/service.py` creates or upgrades an alert, from the
+  incident's freshest propagation forecast if one exists
+  (`forecast/service.py::latest_projected_cells`). This is deliberately kept
+  separate from `Alert.h3_cells` (the confirmed, report-backed area) so a
+  forecast's uncertainty never contaminates routing exclusion
+  (`routing/service.py::exclude_polygons`) or the public confirmed-incident
+  map layer — it only *adds* to delivery-worker geofence matching
+  (`delivery/worker.py::_matches()`), so subscribers directly ahead of a
+  moving hazard front get the same already-automatic advisory/watch alert
+  before they've reported anything themselves. Warning tier is unaffected —
+  `engine.eligible_tier()` still can't return it automatically, so this can
+  only ever widen an *already-automatic* tier's reach, never invent a new
+  escalation.
+- **Forecast validation loop**: `service.py::validate_forecasts()` scores
+  every unvalidated forecast whose full horizon has already elapsed — a
+  sensor forecast against the nearest actual reading within a 20-minute
+  tolerance window at each predicted timestamp (mean absolute error), a
+  propagation forecast against whether any report actually landed in its
+  projected cells within the horizon window (hit rate). Once scored,
+  `validation`/`validated_at` are set once and never edited again — same
+  immutable-after-the-fact discipline as a filed SITREP. A backtest path
+  (`generate_sensor_forecast(..., as_of=<past time>)`, exposed only via
+  `POST /drill/backtest-forecast`) fits against history *as of* a past
+  timestamp instead of now, so its full horizon has already elapsed by the
+  time validation runs — this is what let the drill exercise the entire
+  generate-then-validate loop immediately instead of waiting hours of real
+  wall-clock time.
+- **"Per-district" accuracy, without a district field**: this app's data
+  model has no administrative-district concept anywhere (same gap
+  `modules/ivr/locations.py` already worked around for caller location) — so
+  `service.py::nearest_pilot_location()` buckets a lat/lon to the nearest of
+  the same five named Chennai coastal landmarks IVR already uses, and `GET
+  /forecasts/accuracy` (public) aggregates scored forecasts by that bucket +
+  variable/hazard, exposing mean absolute error (sensor) or mean hit rate
+  (propagation) per location — the "how right were we" metric the plan
+  names.
+- **Real Timescale continuous aggregate, not a plain view**:
+  `sensor_readings_hourly` (`CREATE MATERIALIZED VIEW ... WITH
+  (timescaledb.continuous)` over the `sensor_readings` hypertable from
+  0001, hourly per-station/variable avg/min/max/count, `add_continuous_aggregate_policy`
+  refreshing hourly) is real infrastructure, closing the plan's own
+  "Timescale continuous aggregates per station/variable" line — though the
+  actual forecast fit still reads raw `sensor_readings` rows directly (the
+  aggregate's hourly bucketing is coarser than what a 1-3h-horizon harmonic
+  fit needs); it's there for future dashboard/analyst use, not (yet) wired
+  as the fit's input series. Gotcha hit and fixed: Timescale continuous
+  aggregate creation can't run inside a transaction block — the migration
+  wraps it in `op.get_context().autocommit_block()`.
+- **Closes a named milestone-1 gap**: `inundation/service.py::
+  forecast_flooded_cells_geojson()` applies the bathtub model to a
+  *forecasted* future water level (from the freshest sensor forecast for
+  `inundation_reference_variable`) instead of only ever the current
+  instantaneous reading — `GET /map/inundation/forecast?hours_ahead=` — the
+  gauge-forecast integration milestone 1 explicitly deferred to this
+  milestone.
+- **Frontend**: `MapView.tsx` gets a dashed orange "projected" layer
+  (`/map/propagation`) with its own popup (hazard, front speed, horizon) and
+  legend entry; a station's sparkline popup now also draws a dashed
+  continuation of its sensor forecast (`lib/sparkline.ts` grew an optional
+  second series, reused for exactly this); `AnalystDashboard.tsx` gets a
+  Forecasts card (list, generate-now, per-forecast validation readout, and
+  the public accuracy rollup).
+- **Live-verified end-to-end** via `scripts/drill.py`: a new directional
+  report sequence (6 reports walking north from south of Kasimedu fishing
+  harbour, `POST /drill/inject-reports` — a drill-only endpoint since the
+  public `/reports` API always stamps "now" and can't build a controlled
+  historical sequence) merges into one incident and fits a real front —
+  confirmed speed 1.16 km/h, bearing 360° (due north, as built), 5 cells
+  projected ahead of the 3 actually-reported cells, disjoint from them (an
+  unreported village cell, pre-alerted). A backtested sensor forecast
+  (`POST /drill/backtest-forecast`, fit 3.2h in the past against the drill
+  gauge's own real 7-day calm baseline) validated immediately: 3 points
+  scored, mean abs error 0.48m against the gauge's real readings. The public
+  `/forecasts/accuracy` endpoint also picked up the *real* NDBC buoy
+  station's own forecasts scored against its real accumulated readings,
+  independent of anything the drill injected. 331 backend tests passing (up
+  from 298).
+- **Not built** (explicit gaps, not oversights): TFT (the plan's named
+  upgrade path beyond Prophet) — out of scope, same as ANUGA for inundation;
+  the continuous aggregate isn't yet the forecast fit's actual input series
+  (see above); no forecast-driven UI countdown/ETA display beyond the raw
+  front speed/bearing shown in the popup and analyst card; the new frontend
+  additions (dashed propagation layer, forecast sparkline overlay) weren't
+  visually verified interactively in a browser in this environment (no
+  browser automation tool available here) — verified via the live API
+  responses and a clean production build instead.
+
 ## Milestones
 
 1. Inundation model + alert/routing wiring (independent) — ✅ built, see above
 2. Auto-SITREPs (independent, high agency value) — ✅ built, see above
-3. Forecasting + propagation pre-alerts
+3. Forecasting + propagation pre-alerts — ✅ built, see above
 4. Rumor tracker + alert drafting
 5. Mobile app with offline queue (mesh spike separate)
 6. CoastSnap + IoT pilot in one district
@@ -279,6 +402,10 @@ data-prep step, not credentials.
   live check in `scripts/drill.py` (independently recomputed report count) and a
   two-generation hotspot-movement check against real data.
 - Propagation: drill with directional report sequence → projected cells lie ahead of the
-  front, pre-alert proposed for an unreported village cell.
+  front, pre-alert proposed for an unreported village cell. ✅ `test_forecast_engine.py`
+  + `test_forecast_service.py`, plus a real live check in `scripts/drill.py` (a genuine
+  fitted front — 1.16 km/h, due north — with projected cells confirmed disjoint from the
+  reported ones) and a backtested sensor forecast validated against the drill gauge's own
+  real baseline in the same run.
 - Split: replay identical drill on monolith vs. split deployment → identical end state
   (reports, incidents, alerts, audit chain length).

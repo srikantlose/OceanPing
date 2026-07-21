@@ -15,6 +15,7 @@ from app.core.config import get_settings
 from app.models import Alert, Incident
 from app.modules.alerts import engine
 from app.modules.delivery.queue import enqueue_alert
+from app.modules.forecast.service import latest_projected_cells
 from app.modules.inundation.service import predicted_flooded_cells
 from app.modules.scoring.audit import append_audit
 from app.modules.scoring.engine import HAZARD_VARIABLES
@@ -33,6 +34,13 @@ def _flooded_cells_for(db: Session, hazard_type: str) -> list[str]:
     if "water_level" not in HAZARD_VARIABLES.get(hazard_type, set()):
         return []
     return sorted(predicted_flooded_cells(db))
+
+
+def _projected_cells_for(db: Session, incident: Incident) -> list[str]:
+    """Hazard-front propagation cells to attach to an alert — [] if the
+    incident's reports don't carry enough directional signal to fit a moving
+    front yet (see modules/forecast/engine.py::fit_front)."""
+    return latest_projected_cells(db, incident.id)
 
 
 def _incident_signals(incident: Incident) -> tuple[int, float]:
@@ -75,12 +83,14 @@ def sync_incident_alert(db: Session, incident: Incident) -> Alert | None:
 
     message = engine.draft_message(incident.hazard_type, tier, incident.report_count)
     flooded_cells = _flooded_cells_for(db, incident.hazard_type)
+    projected_cells = _projected_cells_for(db, incident)
     if active is not None:
         old_tier = active.tier
         active.tier = tier
         active.message = message
         active.h3_cells = incident.h3_cells
         active.predicted_flooded_cells = flooded_cells
+        active.projected_cells = projected_cells
         alert = active
         event_type, payload = "alert.tier_changed", {"from": old_tier, "to": tier, "auto": True}
     else:
@@ -93,6 +103,7 @@ def sync_incident_alert(db: Session, incident: Incident) -> Alert | None:
             status="active",
             issued_by=None,
             predicted_flooded_cells=flooded_cells,
+            projected_cells=projected_cells,
             created_at=_utcnow(),
         )
         db.add(alert)
@@ -114,6 +125,7 @@ def issue_warning(
     expires_at = _utcnow() + timedelta(hours=expires_hours or settings.alert_default_expiry_hours)
     message = engine.draft_message(incident.hazard_type, "warning", incident.report_count, note)
     flooded_cells = _flooded_cells_for(db, incident.hazard_type)
+    projected_cells = _projected_cells_for(db, incident)
 
     active = _active_alert(db, incident.id)
     if active is not None:
@@ -124,6 +136,7 @@ def issue_warning(
         active.message = message
         active.h3_cells = incident.h3_cells
         active.predicted_flooded_cells = flooded_cells
+        active.projected_cells = projected_cells
         active.expires_at = expires_at
         alert = active
         event_type, payload = "alert.tier_changed", {"from": old_tier, "to": "warning", "analyst": analyst}
@@ -138,6 +151,7 @@ def issue_warning(
             issued_by=analyst,
             note=note,
             predicted_flooded_cells=flooded_cells,
+            projected_cells=projected_cells,
             created_at=_utcnow(),
             expires_at=expires_at,
         )

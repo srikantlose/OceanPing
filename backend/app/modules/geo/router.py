@@ -2,7 +2,7 @@
 H3 cell centroid — exact coordinates are analyst-only."""
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -10,7 +10,8 @@ from app.core.db import get_db
 from app.models import Incident, Report, SensorReading, Shelter, Station, StationAnomaly
 from app.modules.geo.h3utils import cell_centroid, cell_polygon
 from app.modules.geo.hotspots import hotspots_geojson
-from app.modules.inundation.service import flooded_cells_geojson
+from app.modules.forecast.service import station_forecast_series
+from app.modules.inundation.service import flooded_cells_geojson, forecast_flooded_cells_geojson
 
 router = APIRouter(prefix="/map", tags=["map"])
 
@@ -94,6 +95,19 @@ def inundation(level: float, db: Session = Depends(get_db)) -> dict:
     return flooded_cells_geojson(db, level)
 
 
+@router.get("/inundation/forecast")
+def inundation_forecast(hours_ahead: float = 2.0, db: Session = Depends(get_db)) -> dict:
+    """Bathtub-model flooded cells at a *forecasted* future water level (phase
+    3, milestone 3) rather than the current instantaneous reading — see
+    modules/inundation/service.py::forecast_flooded_cells_geojson. 404s until a
+    sensor forecast for the reference variable exists (same data-gated-degrade
+    pattern as /map/inundation's live wiring)."""
+    result = forecast_flooded_cells_geojson(db, hours_ahead)
+    if result is None:
+        raise HTTPException(status_code=404, detail="No sensor forecast available yet for this variable")
+    return result
+
+
 @router.get("/shelters")
 def shelters(db: Session = Depends(get_db)) -> dict:
     rows = db.scalars(select(Shelter)).all()
@@ -149,6 +163,7 @@ def stations(db: Session = Depends(get_db)) -> dict:
                     "provider": st.provider,
                     "latest": latest,
                     "series": series,
+                    "forecast": station_forecast_series(db, st.id),
                     "anomalies": [
                         {"variable": a.variable, "zscore": round(a.zscore, 2)}
                         for a in anomalies_by_station.get(st.id, [])
