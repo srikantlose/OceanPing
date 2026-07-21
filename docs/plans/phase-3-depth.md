@@ -1,8 +1,8 @@
 # Phase 3 — Depth: Modeling, Ops Automation, Physical Edge, and the Service Split (months 7–10, gap plan)
 
 **Status: 🟡 in progress.** Milestones 1 (inundation model), 2 (auto-SITREPs), 3
-(forecasting + propagation pre-alerts), and 4 (rumor tracker + alert drafting) built —
-see their "as built" sections below.
+(forecasting + propagation pre-alerts), 4 (rumor tracker + alert drafting), and 5
+(mobile app with an offline-first queue) built — see their "as built" sections below.
 Prereqs: phases 1–2 (alerts, delivery, satellite, routing), both done.
 **Independent items**: inundation model, auto-SITREPs, CoastSnap/IoT pilot, drill scale-up.
 
@@ -511,13 +511,95 @@ data-prep step, not credentials.
   automation available here) — verified via live API responses and a clean
   production build instead.
 
+## Milestone 5 — as built
+
+- **New `mobile/`**: an Expo/React Native client whose organising idea is that
+  the moment a coastal hazard is worth reporting is often the moment the
+  network stops working. Every submission is written to a durable local queue
+  first and uploaded later; no screen blocks on connectivity. Three screens —
+  report a hazard, Mark Safe, and an outbox showing what's still waiting.
+- **The queue core imports nothing from React Native** (`src/lib/queue.ts`,
+  `src/lib/sync.ts`). That's deliberate: the same code that runs on device
+  runs under `vitest` and against a real backend from plain Node, which is
+  what made the live check below possible without a device. Storage is behind
+  a `QueueStorage` interface with a SQLite implementation for the device and
+  an in-memory one that doubles as the fallback when SQLite won't open —
+  refusing to accept a report because local storage broke would be the worst
+  failure mode this app has.
+- **Two properties the client and server had to agree on**, both of which
+  needed backend work this milestone:
+  - *A queued observation keeps its own time.* `observedAt` is stamped at
+    submit, and `POST /reports` now accepts it. Without this, a report held
+    three hours and stamped "now" on arrival would silently corroborate
+    whatever was unfolding at sync time — the coherence window (±30 min) and
+    incident merge both key off that timestamp. Because it now arrives on a
+    *public* endpoint, `ingest/service.py::clamp_observed_at` bounds it to
+    `[now - offline_max_report_age_hours, now]`: clamping rather than
+    rejecting keeps a phone with a skewed clock usable, while stopping a
+    caller placing reports inside the window of any past event they choose.
+  - *A retry must not multiply a sighting.* `Report.client_key` is a
+    client-generated idempotency key, reused across every attempt, so a reply
+    lost on a flaky link — indistinguishable, from the phone, from a request
+    that never arrived — resolves to the original report. Report volume feeds
+    the confidence signal, so duplicates would be actively harmful, not
+    untidy. The key is checked before the rate limiter, so a retry can't burn
+    the caller's own quota.
+- **"Mark Safe" is a new `modules/safety/`, not a Report.** A check-in is a
+  statement about a *person*, not an observation of a hazard: it must never
+  reach the confidence engine or incident clustering, because "I'm safe" is
+  not evidence that anything is happening and a cluster of check-ins is not a
+  hazard. Keeping `safety_checkins` in its own table makes that structural
+  rather than a rule someone has to remember. Submission is public (like
+  `/reports` and `/route` — telling responders you need help must never sit
+  behind a login) while *reading* the list is analyst-only, since it's
+  personal location data about identifiable people rather than the aggregate
+  picture the public map shows. Status is deliberately just safe | need_help;
+  anything finer invites triage this app can't verify. Check-ins are
+  audit-logged, because "who told us they needed help, and when did we know"
+  is exactly what a post-event review asks.
+- **Live-verified against the real stack, not mocks** — `mobile/tests/
+  live.integration.ts` drives the actual queue through an offline period (all
+  attempts fail at the transport layer, item stays pending), a recovery (it
+  uploads), and a replay, asserting on what the server said it stored. A
+  report queued 3h earlier landed with `created_at` **0.0s** from its observed
+  time, the replay resolved to the same report id, a *different* key for
+  identical content still created its own report (dedup keys on the
+  submission, not the content — two people reporting the same wave must not
+  collapse), and a Mark Safe check-in reached responders without appearing in
+  the report list. `scripts/drill.py` carries the same assertions plus the
+  clamp (a 30-day-old timestamp came back pinned to 24h). 394 backend tests
+  (up from 378) and 29 mobile tests passing, with a clean `tsc --noEmit`.
+- **Also fixed two drill assertions that were passing vacuously**, both the
+  same underlying mistake — scanning a newest-first capped list for a
+  deliberately backdated record. The auto-alert delivery check targeted
+  whatever alert was newest rather than one *this run* created, so on a rerun
+  it tested a previous run's leftovers (and failed once a stale alert's
+  queued delivery was lost across a container restart); it now filters to
+  alerts created during the run and says so when there are none. The
+  backtested-forecast lookup fell off the end of a 50-row page once forecasts
+  accumulated, which is why `/analyst/forecasts` gained a `subject_id`
+  filter — narrowing to one station is a real analyst need, not a test hack.
+- **Not built** (explicit gaps, not oversights): the mesh relay (BLE/Wi-Fi
+  Direct) remains the timeboxed research spike this plan already scheduled
+  *after* the queue and marked additive — the client timestamps and
+  idempotency keys are exactly the primitives a hop-and-forward layer needs,
+  so the seam exists unused; no offline map packs (the report and check-in
+  flows don't need a map, so tile caching sits behind the parts that do); no
+  CRDT sync (nothing yet has concurrent writers on one record — submissions
+  are append-only from a single device); no photo attachment through the
+  queue (durably queueing binary payloads is a different storage problem than
+  queueing form fields); and the UI itself was never rendered on a device or
+  emulator in this environment — Metro on a Windows path containing a space
+  is a known breaker, so the screens are verified by a clean typecheck rather
+  than by running them.
+
 ## Milestones
 
 1. Inundation model + alert/routing wiring (independent) — ✅ built, see above
 2. Auto-SITREPs (independent, high agency value) — ✅ built, see above
 3. Forecasting + propagation pre-alerts — ✅ built, see above
 4. Rumor tracker + alert drafting — ✅ built, see above
-5. Mobile app with offline queue (mesh spike separate)
+5. Mobile app with offline queue (mesh spike separate) — ✅ built, see above
 6. CoastSnap + IoT pilot in one district
 7. Recovery module
 8. Service split + 50× drill exit test
@@ -543,6 +625,12 @@ data-prep step, not credentials.
   once an analyst rejects a member, then approved and delivered to a real subscriber).
 - Alert drafting: per-tier/language/channel-length variants resolve correctly at send
   time, including for rows predating the change. ✅ `test_alerts_engine.py`.
+- Offline queue: a report queued while offline uploads later carrying the time it was
+  observed, and a retried submission doesn't duplicate. ✅ `mobile/tests/queue.test.ts` +
+  `sync.test.ts` (29), plus `mobile/tests/live.integration.ts` against the running stack
+  and the same assertions in `scripts/drill.py`.
+- Mark Safe: a check-in reaches responders and never enters the hazard/scoring path.
+  ✅ `test_safety_service.py`, plus a live check in `scripts/drill.py`.
 - Audit chain under concurrency: parallel writers must never fork the chain.
   ✅ `test_audit_chain.py` (lock-before-read ordering, no row-level tail lock, and the
   UNIQUE prev_hash backstop), plus a live 12-worker concurrent-write check.

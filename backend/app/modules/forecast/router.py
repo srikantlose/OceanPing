@@ -40,6 +40,11 @@ def _forecast_out(f: Forecast) -> dict:
 @router.get("/analyst/forecasts")
 def list_forecasts(
     kind: str | None = None,
+    # Narrows to one station or incident — without it, a newest-first page
+    # is dominated by whichever subject forecasts most often, and a
+    # backdated forecast (see /drill/backtest-forecast) can fall off the end
+    # entirely.
+    subject_id: str | None = None,
     limit: int = 50,
     _: str = Depends(require_analyst),
     db: Session = Depends(get_db),
@@ -47,6 +52,8 @@ def list_forecasts(
     stmt = select(Forecast).order_by(Forecast.generated_at.desc()).limit(min(limit, 200))
     if kind:
         stmt = stmt.where(Forecast.kind == kind)
+    if subject_id:
+        stmt = stmt.where(Forecast.subject_id == subject_id)
     return [_forecast_out(f) for f in db.scalars(stmt).all()]
 
 

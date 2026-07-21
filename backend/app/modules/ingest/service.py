@@ -3,7 +3,7 @@ Telegram bot, and the drill injector, so every channel gets identical treatment:
 rate limits → reporter → NLP → H3 → media forensics → incident dedup → scoring."""
 import hashlib
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -24,6 +24,38 @@ log = logging.getLogger(__name__)
 
 class RateLimited(Exception):
     pass
+
+
+def clamp_observed_at(observed_at: datetime | None, max_age_hours: float, now: datetime | None = None) -> datetime:
+    """Bound a client-supplied observation time to something a queued report
+    could plausibly carry (phase 3, milestone 5).
+
+    The mobile app's offline queue has to send when a sighting *happened*, not
+    when the device finally found a network — otherwise a report held for
+    hours lands stamped "now" and silently corroborates whatever is happening
+    at sync time. But that timestamp is client-controlled on a public
+    endpoint, and both the coherence signal (±30 min, scoring/service.py) and
+    incident merge (incident_window_hours) key off it, so an unbounded value
+    would let someone place a report inside any window they liked. Clamping
+    rather than rejecting keeps a phone with a skewed clock usable: future
+    times collapse to now, and anything older than the queue could plausibly
+    have held collapses to the floor.
+    """
+    now = now or datetime.now(timezone.utc)
+    if observed_at is None:
+        return now
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=timezone.utc)
+    floor = now - timedelta(hours=max_age_hours)
+    return max(floor, min(observed_at, now))
+
+
+def find_by_client_key(db: Session, client_key: str | None) -> Report | None:
+    """An already-accepted submission for this idempotency key, if any — see
+    Report.client_key for why a retrying offline queue needs this."""
+    if not client_key:
+        return None
+    return db.scalar(select(Report).where(Report.client_key == client_key))
 
 
 # Fisherman mode (phase 2, milestone 5): a role registered via cooperative
@@ -80,6 +112,7 @@ def create_report(
     media_bytes: bytes | None = None,
     media_filename: str | None = None,
     created_at: datetime | None = None,
+    client_key: str | None = None,
 ) -> Report:
     created_at = created_at or datetime.now(timezone.utc)
     cell = cell_for(lat, lon)
@@ -108,6 +141,7 @@ def create_report(
         lang=lang,
         source=source,
         embedding=embedding,
+        client_key=client_key,
         created_at=created_at,
         confidence_components={"media": engine.MEDIA_NEUTRAL},
     )

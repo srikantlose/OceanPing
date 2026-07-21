@@ -216,6 +216,15 @@ class Settings(BaseSettings):
     narrative_window_hours: float = 12.0
     narrative_sim_threshold: float = 0.55
 
+    # Mobile offline queue (phase 3, milestone 5): how far back a client-
+    # supplied observation time may reach before it's clamped (see
+    # ingest/service.py::clamp_observed_at). This bounds how far into the past
+    # a public caller can place a report, since both the coherence window and
+    # incident merge key off that timestamp — long enough for a genuinely
+    # out-of-coverage phone (a fishing trip, a night without signal), short
+    # enough that backdating can't reach an unrelated event.
+    offline_max_report_age_hours: float = 24.0
+
     class Config:
         env_file = ".env"
         extra = "ignore"

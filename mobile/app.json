@@ -1,0 +1,35 @@
+{
+  "expo": {
+    "name": "OceanPing",
+    "slug": "oceanping",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "backgroundColor": "#0d1b2a"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "org.oceanping.app",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "OceanPing uses your location to place the hazard you report and to tell responders where you are when you mark yourself safe."
+      }
+    },
+    "android": {
+      "package": "org.oceanping.app",
+      "permissions": ["ACCESS_COARSE_LOCATION", "ACCESS_FINE_LOCATION"],
+      "adaptiveIcon": {
+        "backgroundColor": "#0d1b2a"
+      }
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "OceanPing uses your location to place the hazard you report and to tell responders where you are when you mark yourself safe."
+        }
+      ]
+    ]
+  }
+}

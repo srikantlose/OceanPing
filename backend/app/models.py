@@ -100,6 +100,14 @@ class Report(Base):
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
     confidence_components: Mapped[dict] = mapped_column(JSONB, default=dict)
     embedding: Mapped[list | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
+    # Client-generated idempotency key (phase 3, milestone 5): the mobile app's
+    # offline queue retries a submission until it gets an answer, and a reply
+    # lost on a flaky link is indistinguishable from a request that never
+    # arrived — so without this a bad network turns one sighting into several
+    # reports, which is exactly the kind of inflation the coherence signal must
+    # never see. Null for reports from channels that don't queue (web form,
+    # Telegram, IVR, drill).
+    client_key: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, index=True
     )
@@ -438,6 +446,41 @@ class Narrative(Base):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class SafetyCheckin(Base):
+    """"Mark Safe" (phase 3, milestone 5): a person telling responders they're
+    safe, or that they need help, during or after an event.
+
+    Deliberately not a `Report`: a check-in is a statement about a *person*,
+    not an observation of a hazard, and must never feed the confidence engine
+    or incident clustering — "I'm safe" is not corroboration that anything is
+    happening, and a cluster of them is not a hazard. Keeping it in its own
+    table makes that separation structural rather than a rule someone has to
+    remember.
+
+    `status` is deliberately coarse (safe | need_help). Anything finer would
+    invite triage decisions this app has no way to verify, and `need_help` is
+    already the only distinction that changes what a responder does next.
+    """
+    __tablename__ = "safety_checkins"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=new_uuid)
+    reporter_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("reporters.id"), index=True)
+    status: Mapped[str] = mapped_column(String(16), index=True)  # safe | need_help
+    lat: Mapped[float] = mapped_column(Float)
+    lon: Mapped[float] = mapped_column(Float)
+    geom = mapped_column(Geometry(geometry_type="POINT", srid=4326))
+    h3_cell: Mapped[str] = mapped_column(String(16), index=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Same offline-queue idempotency contract as Report.client_key.
+    client_key: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
+    # When the person actually marked themselves safe, which can be well
+    # before the device got a network to send it on (see created_at).
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+    reporter: Mapped[Reporter] = relationship()
+
+
 class NarrativeDelivery(Base):
     """Delivery log for an approved narrative correction — same shape as
     `AlertDelivery`, kept as its own table rather than reusing `Alert`/
@@ -463,6 +506,7 @@ Index("ix_forecasts_kind_subject", Forecast.kind, Forecast.subject_id)
 Index("ix_satellite_observations_incident_recipe", SatelliteObservation.incident_id, SatelliteObservation.recipe)
 Index("ix_pfz_advisories_sector_valid", PfzAdvisory.sector, PfzAdvisory.valid_until)
 Index("ix_narratives_status_hazard", Narrative.status, Narrative.hazard_type)
+Index("ix_safety_checkins_status_observed", SafetyCheckin.status, SafetyCheckin.observed_at)
 # Structural guarantee that the audit chain can never fork: in a valid chain
 # every entry's prev_hash is the previous entry's hash, so a repeated
 # prev_hash means two entries claim the same predecessor. Making that a

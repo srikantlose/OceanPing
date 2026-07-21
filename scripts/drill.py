@@ -22,6 +22,9 @@ What it does:
      the rumor tracker leaves it unflagged until an analyst rejects one
      member report, then approves the resulting correction draft and
      confirms it was delivered to a subscriber near the rumor's location.
+  9. Exercises the mobile offline-sync contract: a backdated report keeps its
+     observation time, a retried submission doesn't duplicate, and a Mark
+     Safe check-in reaches responders without ever becoming a hazard report.
 """
 import argparse
 import json
@@ -325,7 +328,14 @@ def main() -> None:
           f"projected ahead of the {len(origin_cells)} reported cell(s) — an unreported village cell, pre-alerted")
 
     print("→ Checking the backtested sensor forecast validated against its own real baseline…")
-    sensor_forecasts = call(args.api, "/analyst/forecasts?kind=sensor&limit=50", token=token)
+    # Scoped to the drill gauge: the backtested forecast is deliberately
+    # stamped 3.2h in the past, so on an accumulated dev DB it sorts below a
+    # newest-first page of every station's forecasts.
+    sensor_forecasts = call(
+        args.api,
+        f"/analyst/forecasts?kind=sensor&subject_id={DRILL_STATION['id']}&limit=200",
+        token=token,
+    )
     validated = next((f for f in sensor_forecasts if f["id"] == backtest["id"]), None)
     assert validated, "backtested forecast disappeared — did /drill/tick's validate_forecasts run?"
     assert validated["validated_at"], (
@@ -415,15 +425,25 @@ def main() -> None:
     d = narrative_deliveries[0]
     print(f"   {len(narrative_deliveries)} delivery attempt(s), e.g. [{d['status']}] via {d['channel']} to {d['address']}")
 
-    if active_alerts:
+    # Only alerts this run actually created or upgraded get re-enqueued for
+    # delivery — sync_incident_alert() deliberately returns early for an
+    # incident already sitting at its final automatic tier. On a rerun against
+    # an accumulated dev DB most active alerts are in that state, so asserting
+    # against whatever alert happens to be newest would be testing a previous
+    # run's leftovers rather than this one's wiring.
+    fresh_alerts = [a for a in active_alerts if datetime.fromisoformat(a["created_at"]) >= now]
+    if fresh_alerts:
         print("→ Checking the delivery worker fanned the auto-proposed alert out to the drill subscriber…")
-        deliveries = poll_deliveries(args.api, token, active_alerts[0]["id"])
+        deliveries = poll_deliveries(args.api, token, fresh_alerts[0]["id"])
         assert deliveries, (
-            f"No delivery attempts recorded for alert {active_alerts[0]['id'][:8]} — "
+            f"No delivery attempts recorded for alert {fresh_alerts[0]['id'][:8]} — "
             "is the delivery worker (docker compose service `worker`) running?"
         )
         d = deliveries[0]
         print(f"   {len(deliveries)} delivery attempt(s), e.g. [{d['status']}] via {d['channel']} to {d['address']}")
+    else:
+        print("→ No new auto-alert was proposed this run (every incident already sits at its final "
+              "automatic tier) — the analyst-issued warning below still exercises delivery end to end.")
 
     if incidents:
         biggest = max(incidents, key=lambda i: i["report_count"])
@@ -504,6 +524,66 @@ def main() -> None:
     assert filed["status"] == "filed", "expected the SITREP to move to filed status"
     assert filed["filed_by"] == args.username
     print(f"   filed by {filed['filed_by']}")
+
+    print("→ Mobile offline sync: submitting a report backdated 3h, as a phone that was out of coverage would…")
+    observed_at = (now - timedelta(hours=3)).isoformat()
+    offline_key = f"drill-offline-{int(time.time())}"
+    offline_form = {
+        "lat": f"{MARINA[0] + 0.004:.6f}", "lon": f"{MARINA[1] + 0.002:.6f}",
+        "client_id": "drill-mobile-1", "hazard_type": "high_waves",
+        "text": "waves coming over the wall near the lighthouse, no signal until now",
+        "observed_at": observed_at, "client_key": offline_key,
+    }
+    queued = call(args.api, "/reports", method="POST", form=offline_form)
+    skew = abs((datetime.fromisoformat(queued["created_at"]) - datetime.fromisoformat(observed_at)).total_seconds())
+    assert skew < 60, (
+        f"a queued report must keep the time it was observed, not the time it synced — "
+        f"created_at is {skew:.0f}s away from the submitted observed_at"
+    )
+    print(f"   report {queued['id'][:8]} stored at its observed time ({skew:.0f}s skew), not at sync time")
+
+    print("→ Mobile offline sync: replaying the same submission, as a phone whose reply was lost would…")
+    replayed = call(args.api, "/reports", method="POST", form=offline_form)
+    assert replayed["id"] == queued["id"], (
+        "a retried submission created a second report — the client_key idempotency check isn't working, "
+        "and duplicate reports would inflate the coherence signal"
+    )
+    print(f"   replay resolved to the same report {replayed['id'][:8]} — no duplicate created")
+
+    print("→ Mobile offline sync: rejecting a backdated timestamp beyond the allowed window…")
+    ancient = call(args.api, "/reports", method="POST", form={
+        **offline_form,
+        "client_key": f"{offline_key}-ancient",
+        "observed_at": (now - timedelta(days=30)).isoformat(),
+    })
+    ancient_age_hours = (now - datetime.fromisoformat(ancient["created_at"])).total_seconds() / 3600
+    assert ancient_age_hours <= 25, (
+        f"a 30-day-old observed_at was accepted as-is ({ancient_age_hours:.1f}h old) — clamping is what stops a "
+        "public caller placing reports inside the coherence window of any past event they choose"
+    )
+    print(f"   30-day-old timestamp clamped to {ancient_age_hours:.1f}h old (the offline window), not accepted as-is")
+
+    print("→ Mark Safe: submitting an 'I need help' check-in…")
+    checkin = call(args.api, "/safety/checkin", method="POST", form={
+        "lat": f"{MARINA[0]:.6f}", "lon": f"{MARINA[1]:.6f}",
+        "client_id": "drill-mobile-1", "status": "need_help",
+        "note": "Drill: on the roof, water rising", "client_key": f"{offline_key}-safe",
+    })
+    assert checkin["status"] == "need_help"
+    need_help = call(args.api, "/analyst/safety/checkins?hours=1&status=need_help", token=token)
+    assert any(c["id"] == checkin["id"] for c in need_help), (
+        "the check-in didn't reach the responder-facing list"
+    )
+    summary = call(args.api, "/analyst/safety/summary?hours=1", token=token)
+    print(f"   check-in {checkin['id'][:8]} visible to responders; last hour: "
+          f"{summary['safe']} safe, {summary['need_help']} need help")
+
+    recent_reports = call(args.api, "/analyst/reports?limit=25", token=token)
+    assert not any("on the roof, water rising" in (r.get("text") or "") for r in recent_reports), (
+        "a safety check-in leaked into the hazard report pipeline — a statement about a person must never "
+        "feed confidence scoring or incident clustering"
+    )
+    print("   confirmed: the check-in never became a hazard report (it can't corroborate anything)")
 
     chain = call(args.api, "/analyst/audit/verify", token=token)
     print(f"→ Audit chain: intact={chain['intact']} over {chain['entries_checked']} entries")
