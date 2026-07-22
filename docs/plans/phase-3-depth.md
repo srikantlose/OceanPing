@@ -1,10 +1,12 @@
 # Phase 3 — Depth: Modeling, Ops Automation, Physical Edge, and the Service Split (months 7–10, gap plan)
 
 **Status: 🟡 in progress.** Milestones 1 (inundation model), 2 (auto-SITREPs), 3
-(forecasting + propagation pre-alerts), 4 (rumor tracker + alert drafting), and 5
-(mobile app with an offline-first queue) built; milestone 6's LoRaWAN IoT pilot built &
-live-verified (CoastSnap half deferred) — see their "as built" sections below.
-Prereqs: phases 1–2 (alerts, delivery, satellite, routing), both done.
+(forecasting + propagation pre-alerts), 4 (rumor tracker + alert drafting), 5
+(mobile app with an offline-first queue), and 7 (recovery module — damage
+assessment, mutual-aid board, missing-person registry) built; milestone 6's
+LoRaWAN IoT pilot built & live-verified (CoastSnap half deferred) — see their
+"as built" sections below. Prereqs: phases 1–2 (alerts, delivery, satellite,
+routing), both done.
 **Independent items**: inundation model, auto-SITREPs, CoastSnap/IoT pilot, drill scale-up.
 
 ## Goals
@@ -658,6 +660,140 @@ within the milestone (rationale at the end).
   changes" are therefore not built yet; the IoT half is the real, verifiable
   slice of this milestone's "physical edge."
 
+## Milestone 7 — as built
+
+- **New module `modules/recovery/`**, same `engine.py` (pure) / `service.py`
+  (DB I/O) / `router.py` (thin) split as every other module here, plus a
+  `cv.py` sibling for the damage-photo triage (mirroring `ingest/media.py`'s
+  role as a non-`engine` helper file). Four new tables — `damage_assessments`,
+  `relief_requests`, `aid_offers`, `missing_persons` — none of them a
+  `Report`: each is a statement about a place, a need, an offer, or a person,
+  not a hazard observation, so none of them touch scoring or incident
+  clustering (the same structural separation `SafetyCheckin` established in
+  milestone 5).
+- **Damage assessment's CV adapter is deliberately not YOLOv8/SAM**, despite
+  the plan naming it "same lazy-load pattern as nlp/classifier.py": a
+  pretrained COCO detector doesn't know what building damage looks like, and
+  this environment has no labeled Indian coastal-damage dataset to fine-tune
+  one against — the plan's own risk section already says so ("CV model
+  quality... budget hand-labeling"). Shipping a generic detector and calling
+  its output a damage classifier would be theater, the same call already made
+  for CoastSnap and the satellite scene-scoring recipes. Instead
+  `cv.py::image_stats()` computes real signals directly from the photo's own
+  pixels — brightness, a "water/mud" hue fraction, and edge density (Pillow +
+  numpy, no new dependency) — and `classify_from_stats()` derives a coarse
+  `damage_class`/`severity`/`confidence` from real thresholds, genuinely
+  responsive to what was actually photographed (verified with deterministic
+  synthetic images: solid blue → flooding/destroyed, a checkerboard → high
+  edge density → structural_or_debris, uniform gray → minor_or_none) rather
+  than a hash-based stand-in. `cv.py::_load_yolo()` still mirrors
+  `_load_model()`'s lazy-load-with-cached-failure shape exactly — if
+  `ultralytics` is ever installed, real object detections get attached to
+  `cv_detail` as analyst context, but never override the heuristic's
+  class/severity, since generic COCO classes don't map to a damage taxonomy.
+  Not installed in this environment, so `cv_mode` reads `heuristic` in every
+  live run — the same "unit-tested seam, not exercised live" honesty
+  milestone 4 gave the narrative LLM-polish path.
+- **Mutual-aid board is a suggestion list, never an assignment.**
+  `engine.py::match_aid()` pairs every open `ReliefRequest`/`AidOffer` sharing
+  a category within `recovery_mutual_aid_max_km` (5 km default), nearest
+  first — deliberately not an exclusive solver, since one offer legitimately
+  belongs in reach of several nearby requests and deciding which gets it
+  first is a human call this app has no basis to make.
+  `service.py::suggested_aid_matches()` recomputes it fresh on every call over
+  currently-open rows (pilot volumes are small enough this needs no
+  background job, the same reasoning `haversine_km`'s own docstring already
+  gives). Fulfilling a request or closing an offer just flips its status —
+  once closed, it drops out of the next computation automatically.
+- **Missing/found matching is fuzzy-name, analyst-confirmed, never
+  automatic.** `engine.py::fuzzy_name_score()` uses stdlib `difflib`
+  (`SequenceMatcher.ratio`) — no embedding model needed to catch a likely
+  misspelling or transliteration variant, and it's exactly the "no external
+  deps" call the phase plan's own milestone-7 framing anticipated.
+  `rank_missing_matches()` geo-gates a candidate only when *both* sides carry
+  a location (a phone-in report with no location shouldn't be penalized for
+  it), so a strong name match a long way from where someone went missing gets
+  dropped rather than surfaced. Resolving a match
+  (`POST /analyst/recovery/missing/{id}/resolve`) is always an analyst
+  action that cross-links both rows and closes them together — misidentifying
+  a person is a far worse failure mode than a missed match, so nothing here
+  ever auto-resolves.
+- **Strict privacy on the missing-person registry, structural not
+  conventional.** Submission is public (`POST /recovery/missing`) — same
+  reasoning as `/reports` and `/safety/checkin`: a family member reporting
+  someone missing must never sit behind a login. Every *read* path
+  (`GET /analyst/recovery/missing*`) is analyst-only via the same
+  `require_analyst` dependency every other analyst endpoint uses, live-checked
+  in the drill (an unauthenticated read is rejected with HTTP 401). The audit
+  log entries for `recovery.missing_reported`/`_resolved` deliberately omit
+  the person's name/description — a hash-chained log that outlives this
+  table's retention window shouldn't become the second, longer-lived place a
+  vulnerable person's details live.
+- **Retention is a real scheduled job, not a documented policy.**
+  `service.py::purge_expired_missing_persons()` deletes rows (and their photo
+  file off disk) past `recovery_missing_person_retention_days` (180 days
+  default), applied uniformly regardless of resolution status — this
+  registry's job is done within months, and indefinite retention of a name/
+  photo/description of a vulnerable person is the actual risk being managed;
+  a case still open after the window is an operational escalation this pilot
+  table isn't the right place to track forever. Wired into
+  `core/scheduler.py` on a daily interval, plus a manual
+  `POST /analyst/recovery/missing/purge-expired` trigger (the same
+  "don't wait for the tick" convenience `/analyst/narratives/detect` already
+  offers). The self-referential `matched_person_id` FK is explicitly nulled
+  for any row pointing into the expired set *before* the deletes run — the
+  ORM has no relationship() to infer that delete ordering from automatically,
+  so getting this wrong would surface as a live FK-constraint failure the
+  moment two cross-linked rows aged out together, not just a test gap.
+- **Public damage-map layer**: `GET /map/damage` (added to `geo/router.py`
+  alongside the other `/map/*` endpoints, not a new prefix) fuzzes each
+  assessment to its H3 cell centroid — same privacy convention as
+  `/map/reports` — though a damage assessment carries no reporter PII (a
+  photo of a place, not a person) so nothing else about it needs hiding.
+  `MapView.tsx` gets a severity-colored damage layer and popup;
+  `AnalystDashboard.tsx` gets a Recovery card (damage review, the mutual-aid
+  board with fulfill/close actions, and the missing/found list with a
+  "find matches" / resolve flow) — a new `SEVERITY_COLORS`/`SEVERITY_LABELS`
+  palette entry keeps damage severity visually distinct from report status
+  and alert tier at a glance. A `postFormAuth()` helper was added to
+  `lib/api.ts` since this is the first analyst-authenticated endpoint set
+  that takes form-encoded bodies rather than JSON.
+- **Live-verified end-to-end** via `scripts/drill.py` (a hand-built solid-blue
+  PNG, constructed with stdlib `struct`/`zlib` only — no Pillow on the drill
+  side — plus a new stdlib-only `post_multipart()` helper, since this is the
+  first drill scenario needing a real file upload): the photo classifies as
+  `flooding`/`destroyed` and appears on `/map/damage`; a relief request and a
+  nearby matching aid offer surface on the mutual-aid board and the request
+  correctly drops off the open list once fulfilled; a "missing" report for
+  "Kavya Raman" and a "found" report for the near-duplicate "Kavia Raman" ~1.1
+  km away surface each other as a candidate match (name score 0.909) and
+  resolving one closes both; an unauthenticated read of the registry is
+  rejected with HTTP 401; and a manual retention-purge trigger runs cleanly
+  without touching the drill's own fresh rows. Run twice — once against a
+  freshly reset dev DB (all 16 migrations replaying clean) and once as an
+  immediate rerun against the now-accumulated state — both passed, including
+  every existing drill assertion; the reset was also what surfaced and
+  resolved unrelated dev-DB bloat from repeated past sessions' drill runs
+  (a stale Kasimedu front-incident count), not anything this milestone
+  touched. Audit chain intact after both runs. 449 backend tests passing (up
+  from 417), including 44 new recovery unit tests (`test_recovery_cv.py`,
+  `test_recovery_engine.py`, `test_recovery_service.py`); frontend production
+  build (`next build`) clean with no type errors.
+- **Not built** (explicit gaps, not oversights): no fine-tuned damage
+  classifier (see above — named upgrade path, same honesty as ANUGA/TFT/
+  CoastSnap); no exclusive-assignment solver for the mutual-aid board (a
+  suggestion list is the deliberate design, not a placeholder); no photo
+  attached to a missing/found submission was exercised live in the drill
+  (the field exists and is unit-tested, just not part of the drill's
+  multipart scenario); no casualty/relief-measure section feeding back into
+  SITREPs yet (milestone 2 named this as recovery module's job — a natural
+  follow-up now that the data exists, not done in this pass); and the new
+  frontend additions (damage map layer, Recovery card) weren't visually
+  verified interactively in a browser in this environment (no browser
+  automation tool available here) — verified via live API responses, a
+  clean `next build`, and the drill's own screenshots-free assertions
+  instead.
+
 ## Milestones
 
 1. Inundation model + alert/routing wiring (independent) — ✅ built, see above
@@ -666,7 +802,7 @@ within the milestone (rationale at the end).
 4. Rumor tracker + alert drafting — ✅ built, see above
 5. Mobile app with offline queue (mesh spike separate) — ✅ built, see above
 6. CoastSnap + IoT pilot in one district — 🟡 IoT pilot built & live-verified; CoastSnap deferred (see above)
-7. Recovery module
+7. Recovery module — ✅ built, see above
 8. Service split + 50× drill exit test
 
 ## Verification
@@ -703,5 +839,25 @@ within the milestone (rationale at the end).
 - Audit chain under concurrency: parallel writers must never fork the chain.
   ✅ `test_audit_chain.py` (lock-before-read ordering, no row-level tail lock, and the
   UNIQUE prev_hash backstop), plus a live 12-worker concurrent-write check.
+- Recovery — damage assessment: a photo's real pixel signals (not a hash) drive its
+  triage class/severity, never a Report. ✅ `test_recovery_cv.py` (deterministic
+  synthetic images) + `test_recovery_service.py`, plus a live check in
+  `scripts/drill.py` (a hand-built solid-blue PNG classifies as flooding/destroyed
+  and appears on the public `/map/damage` layer).
+- Recovery — mutual-aid board: same-category requests/offers within range surface as
+  candidate matches; fulfilling/closing one removes it from later matches.
+  ✅ `test_recovery_engine.py` + `test_recovery_service.py`, plus a live check in
+  `scripts/drill.py` (a nearby request/offer pair matched, then the request dropped
+  off the open list once fulfilled).
+- Recovery — missing/found registry: a near-duplicate name (and, when both sides
+  carry a location, proximity) surfaces a candidate match; resolving one closes both
+  sides; every read path is analyst-only. ✅ `test_recovery_engine.py` +
+  `test_recovery_service.py`, plus a live check in `scripts/drill.py` ("Kavya Raman"
+  / "Kavia Raman" matched at name score 0.909 and resolved together, and an
+  unauthenticated read was rejected with HTTP 401).
+- Recovery — retention: a scheduled job (not just policy) removes expired
+  missing-person rows and their photo file, and never touches fresh rows.
+  ✅ `test_recovery_service.py` (including the self-referential FK-unlink-before-
+  delete case), plus a live manual-purge check in `scripts/drill.py`.
 - Split: replay identical drill on monolith vs. split deployment → identical end state
   (reports, incidents, alerts, audit chain length).

@@ -10,6 +10,7 @@ import {
   HAZARD_COLORS,
   HAZARD_LABELS,
   INK,
+  SEVERITY_COLORS,
   STATUS_COLORS,
 } from "@/lib/palette";
 import { sparklineSVG } from "@/lib/sparkline";
@@ -44,6 +45,11 @@ function hazardMatch(): any {
 function tierMatch(): any {
   const pairs = Object.entries(ALERT_TIER_COLORS).flat();
   return ["match", ["get", "tier"], ...pairs.slice(0, -1), ALERT_TIER_COLORS.advisory];
+}
+
+function severityMatch(): any {
+  const pairs = Object.entries(SEVERITY_COLORS).flat();
+  return ["match", ["get", "severity"], ...pairs.slice(0, -1), SEVERITY_COLORS.minor];
 }
 
 async function fetchFC(path: string) {
@@ -156,7 +162,7 @@ export default function MapView() {
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
 
     map.on("load", () => {
-      for (const id of ["hotspots", "alerts", "incident-cells", "incidents", "reports", "stations", "shelters", "route", "inundation", "propagation"]) {
+      for (const id of ["hotspots", "alerts", "incident-cells", "incidents", "reports", "stations", "shelters", "route", "inundation", "propagation", "damage"]) {
         map.addSource(id, { type: "geojson", data: EMPTY_FC as any });
       }
 
@@ -314,6 +320,30 @@ export default function MapView() {
       });
 
       map.addLayer({
+        id: "damage-circle",
+        type: "circle",
+        source: "damage",
+        paint: {
+          "circle-color": severityMatch(),
+          "circle-radius": 6,
+          "circle-stroke-width": 2,
+          "circle-stroke-color": INK.surface,
+        },
+      });
+      map.addLayer({
+        id: "damage-icon",
+        type: "symbol",
+        source: "damage",
+        layout: {
+          "text-field": "⚠",
+          "text-size": 8,
+          "text-font": ["Noto Sans Regular"],
+          "text-allow-overlap": true,
+        },
+        paint: { "text-color": INK.surface },
+      });
+
+      map.addLayer({
         id: "route-line",
         type: "line",
         source: "route",
@@ -321,7 +351,7 @@ export default function MapView() {
       });
 
       const refresh = async () => {
-        const [hotspots, alerts, incidents, reports, stations, shelters, propagation] = await Promise.all([
+        const [hotspots, alerts, incidents, reports, stations, shelters, propagation, damage] = await Promise.all([
           fetchFC("/map/hotspots"),
           fetchFC("/map/alerts"),
           fetchFC("/map/incidents"),
@@ -329,6 +359,7 @@ export default function MapView() {
           fetchFC("/map/stations"),
           fetchFC("/map/shelters"),
           fetchFC("/map/propagation"),
+          fetchFC("/map/damage"),
         ]);
         const cells = {
           type: "FeatureCollection",
@@ -350,6 +381,7 @@ export default function MapView() {
         (map.getSource("stations") as any)?.setData(stations);
         (map.getSource("shelters") as any)?.setData(shelters);
         (map.getSource("propagation") as any)?.setData(propagation);
+        (map.getSource("damage") as any)?.setData(damage);
       };
       refresh();
       const timer = setInterval(refresh, REFRESH_MS);
@@ -444,6 +476,19 @@ export default function MapView() {
         );
       });
 
+      map.on("click", "damage-circle", (e) => {
+        const p: any = e.features?.[0]?.properties;
+        if (!p) return;
+        const color = SEVERITY_COLORS[p.severity] || SEVERITY_COLORS.minor;
+        popup(
+          e.lngLat,
+          `<div class="popup-title" style="color:${color}">Damage: ${p.damage_class.replace(/_/g, " ")}</div>
+           <div class="popup-sub">Severity: ${p.severity}</div>
+           <div style="font-size:12px">CV confidence ${(p.cv_confidence * 100).toFixed(0)}%</div>
+           <div class="spark-caption">${new Date(p.created_at).toLocaleString()}</div>`
+        );
+      });
+
       map.on("click", "inundation-fill", (e) => {
         const p: any = e.features?.[0]?.properties;
         if (!p) return;
@@ -454,7 +499,7 @@ export default function MapView() {
         );
       });
 
-      for (const layer of ["stations-circles", "incidents-circles", "reports-circles", "alerts-fill", "shelters-circle", "inundation-fill", "propagation-fill"]) {
+      for (const layer of ["stations-circles", "incidents-circles", "reports-circles", "alerts-fill", "shelters-circle", "inundation-fill", "propagation-fill", "damage-circle"]) {
         map.on("mouseenter", layer, () => (map.getCanvas().style.cursor = "pointer"));
         map.on("mouseleave", layer, () => (map.getCanvas().style.cursor = ""));
       }

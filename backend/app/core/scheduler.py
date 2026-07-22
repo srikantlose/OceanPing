@@ -31,6 +31,7 @@ def build_scheduler() -> BackgroundScheduler:
         validate_forecasts,
     )
     from app.modules.narratives.service import detect_narratives
+    from app.modules.recovery.service import purge_expired_missing_persons
     from app.modules.satellite.service import poll_satellite
     from app.modules.scoring.service import rescore_recent
     from app.modules.sensors.service import detect_anomalies, poll_all
@@ -58,6 +59,8 @@ def build_scheduler() -> BackgroundScheduler:
                       id="forecast_validate")
     scheduler.add_job(_job(detect_narratives), "interval", minutes=settings.narrative_interval_minutes,
                       id="narrative_detect")
+    scheduler.add_job(_job(purge_expired_missing_persons), "interval", hours=24,
+                      id="missing_person_retention_purge")
     # One-shot initial jobs so the map/sea page have data right after startup.
     scheduler.add_job(_job(poll_all), id="erddap_poll_initial")
     scheduler.add_job(_job(refresh_pfz_advisories), id="pfz_refresh_initial")

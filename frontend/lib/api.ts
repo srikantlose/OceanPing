@@ -36,6 +36,26 @@ export async function postForm<T = any>(path: string, form: FormData): Promise<T
   return res.json();
 }
 
+export async function postFormAuth<T = any>(
+  path: string,
+  fields: Record<string, string>,
+  token: string
+): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Authorization: `Bearer ${token}`,
+    },
+    body: new URLSearchParams(fields).toString(),
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new Error(detail?.detail || `${res.status}`);
+  }
+  return res.json();
+}
+
 export function clientId(): string {
   if (typeof window === "undefined") return "ssr";
   let id = localStorage.getItem("oceanping-client-id");

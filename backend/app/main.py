@@ -17,6 +17,7 @@ from app.modules.geo.router import router as geo_router
 from app.modules.ingest.router import router as ingest_router
 from app.modules.ivr.router import router as ivr_router
 from app.modules.narratives.router import router as narratives_router
+from app.modules.recovery.router import router as recovery_router
 from app.modules.routing.router import router as routing_router
 from app.modules.safety.router import router as safety_router
 from app.modules.sitrep.router import router as sitrep_router
@@ -99,6 +100,7 @@ app.include_router(sitrep_router)
 app.include_router(forecast_router)
 app.include_router(narratives_router)
 app.include_router(safety_router)
+app.include_router(recovery_router)
 
 
 @app.get("/healthz")

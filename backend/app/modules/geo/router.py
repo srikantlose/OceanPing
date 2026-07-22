@@ -12,6 +12,7 @@ from app.modules.geo.h3utils import cell_centroid, cell_polygon
 from app.modules.geo.hotspots import hotspots_geojson
 from app.modules.forecast.service import station_forecast_series
 from app.modules.inundation.service import flooded_cells_geojson, forecast_flooded_cells_geojson
+from app.modules.recovery.service import public_damage_features
 
 router = APIRouter(prefix="/map", tags=["map"])
 
@@ -106,6 +107,15 @@ def inundation_forecast(hours_ahead: float = 2.0, db: Session = Depends(get_db))
     if result is None:
         raise HTTPException(status_code=404, detail="No sensor forecast available yet for this variable")
     return result
+
+
+@router.get("/damage")
+def damage(hours: float = 72.0, db: Session = Depends(get_db)) -> dict:
+    """Post-disaster damage-map layer (phase 3, milestone 7) — see
+    modules/recovery/service.py::public_damage_features. Fuzzed to H3 cell
+    centroid like /map/reports; safe to show in full detail otherwise since a
+    damage assessment carries no reporter PII."""
+    return public_damage_features(db, hours=hours)
 
 
 @router.get("/shelters")

@@ -25,16 +25,27 @@ What it does:
   9. Exercises the mobile offline-sync contract: a backdated report keeps its
      observation time, a retried submission doesn't duplicate, and a Mark
      Safe check-in reaches responders without ever becoming a hazard report.
+ 10. Recovery module: submits a damage-assessment photo (a hand-built PNG —
+     stdlib only, no Pillow on the client side) and checks the CV triage
+     reads it as flooding; posts a matching relief request + aid offer and
+     confirms the mutual-aid board pairs them; submits a missing-person and a
+     near-duplicate-name found-person report and confirms the fuzzy matcher
+     surfaces the pair for an analyst to resolve; confirms the registry
+     rejects an unauthenticated read.
 """
 import argparse
+import binascii
 import json
 import math
+import os
 import random
+import struct
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from datetime import datetime, timedelta, timezone
 
 MARINA = (13.0500, 80.2824)  # Chennai Marina Beach
@@ -110,6 +121,50 @@ def call(api: str, path: str, *, method: str = "GET", token: str | None = None,
     except urllib.error.HTTPError as exc:
         body = exc.read().decode(errors="replace")
         raise SystemExit(f"HTTP {exc.code} on {method} {path}: {body}") from exc
+
+
+def _png_chunk(tag: bytes, data: bytes) -> bytes:
+    return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+
+def _solid_color_png(width: int, height: int, rgb: tuple[int, int, int]) -> bytes:
+    """A minimal hand-built solid-color PNG — stdlib only (struct + zlib), no
+    Pillow on the drill/client side, mirroring how a real phone photo arrives
+    as opaque bytes over the wire. 8-bit RGB, one uncompressed filter-0 row
+    per scanline."""
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    row = bytes([0]) + bytes(rgb) * width
+    idat = zlib.compress(row * height)
+    return sig + _png_chunk(b"IHDR", ihdr) + _png_chunk(b"IDAT", idat) + _png_chunk(b"IEND", b"")
+
+
+def post_multipart(api: str, path: str, *, token: str | None = None,
+                    fields: dict | None = None, files: dict | None = None) -> dict:
+    """Minimal multipart/form-data POST — stdlib only. `files` maps field
+    name -> (filename, content_bytes, content_type)."""
+    boundary = binascii.hexlify(os.urandom(16)).decode()
+    parts = []
+    for name, value in (fields or {}).items():
+        parts.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
+        )
+    for name, (filename, content, content_type) in (files or {}).items():
+        parts.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
+            f'Content-Type: {content_type}\r\n\r\n'.encode() + content + b"\r\n"
+        )
+    parts.append(f"--{boundary}--\r\n".encode())
+    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(api + path, data=b"".join(parts), headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode(errors="replace")
+        raise SystemExit(f"HTTP {exc.code} on POST {path}: {body}") from exc
 
 
 def _point_in_ring(point: list[float], ring: list[list[float]]) -> bool:
@@ -584,6 +639,97 @@ def main() -> None:
         "feed confidence scoring or incident clustering"
     )
     print("   confirmed: the check-in never became a hazard report (it can't corroborate anything)")
+
+    print("→ Recovery: submitting a damage-assessment photo (a hand-built solid-blue PNG)…")
+    flood_photo = _solid_color_png(64, 64, (20, 40, 200))
+    damage = post_multipart(
+        args.api, "/recovery/damage",
+        fields={"lat": f"{MARINA[0]:.6f}", "lon": f"{MARINA[1] + 0.001:.6f}",
+                "client_id": "drill-recovery-1", "note": "Drill: seafront kiosk"},
+        files={"photo": ("flood.png", flood_photo, "image/png")},
+    )
+    assert damage["damage_class"] == "flooding", (
+        f"expected the solid-blue photo to read as flooding, got {damage['damage_class']} "
+        f"(cv_detail={damage['cv_detail']}) — did the pixel-heuristic thresholds change?"
+    )
+    print(f"   assessment {damage['id'][:8]}: {damage['damage_class']}/{damage['severity']} "
+          f"(cv_mode={damage['cv_mode']}, confidence={damage['cv_confidence']})")
+    damage_map = call(args.api, "/map/damage")
+    assert any(f["properties"]["id"] == damage["id"] for f in damage_map["features"]), (
+        "the submitted damage assessment did not appear on the public /map/damage layer"
+    )
+    reviewed = call(args.api, f"/analyst/recovery/damage/{damage['id']}/review", method="POST", token=token)
+    assert reviewed["status"] == "reviewed"
+    print(f"   {len(damage_map['features'])} damage assessment(s) on the public map; analyst marked it reviewed")
+
+    print("→ Recovery: posting a relief request and a matching aid offer…")
+    relief = call(args.api, "/recovery/relief-requests", method="POST", form={
+        "lat": f"{MARINA[0]:.6f}", "lon": f"{MARINA[1] + 0.002:.6f}",
+        "client_id": "drill-recovery-2", "category": "water", "people_count": "5",
+    })
+    offer = call(args.api, "/recovery/aid-offers", method="POST", form={
+        "lat": f"{MARINA[0] + 0.002:.6f}", "lon": f"{MARINA[1] + 0.002:.6f}",
+        "client_id": "drill-recovery-3", "category": "water", "capacity": "20",
+    })
+    matches = call(args.api, "/analyst/recovery/aid-matches", token=token)
+    assert any(m["request_id"] == relief["id"] and m["offer_id"] == offer["id"] for m in matches), (
+        "the mutual-aid board did not pair a same-category request and offer a few hundred meters apart"
+    )
+    print(f"   board suggests {len(matches)} match(es), incl. request {relief['id'][:8]} <-> offer {offer['id'][:8]}")
+
+    fulfilled = call(args.api, f"/analyst/recovery/relief-requests/{relief['id']}/fulfill",
+                     method="POST", token=token, form={"fulfilled_by": "Drill Relief Team"})
+    assert fulfilled["status"] == "fulfilled"
+    open_requests = call(args.api, "/analyst/recovery/relief-requests", token=token)
+    assert not any(r["id"] == relief["id"] for r in open_requests), (
+        "a fulfilled relief request is still showing in the open list"
+    )
+    print(f"   request {relief['id'][:8]} fulfilled by {fulfilled['fulfilled_by']} and dropped from the open list")
+
+    print("→ Recovery: submitting a missing-person report and a near-duplicate-name found-person report…")
+    missing = call(args.api, "/recovery/missing", method="POST", form={
+        "client_id": "drill-recovery-4", "report_type": "missing", "name": "Kavya Raman",
+        "age": "34", "description": "wearing a yellow saree, last seen near the seafront",
+        "lat": f"{MARINA[0]:.6f}", "lon": f"{MARINA[1]:.6f}",
+    })
+    found = call(args.api, "/recovery/missing", method="POST", form={
+        "client_id": "drill-recovery-5", "report_type": "found", "name": "Kavia Raman",
+        "description": "found near the fishing harbour, doesn't recall her address",
+        "lat": f"{MARINA[0] + 0.01:.6f}", "lon": f"{MARINA[1]:.6f}",
+    })
+    candidates = call(args.api, f"/analyst/recovery/missing/{missing['id']}/matches", token=token)
+    assert any(c["candidate_id"] == found["id"] for c in candidates), (
+        f"expected the found-person report (near-duplicate name 'Kavia Raman') to surface as a candidate "
+        f"match for missing report {missing['id'][:8]} — candidates={candidates}"
+    )
+    print(f"   {len(candidates)} candidate match(es) for {missing['id'][:8]}, "
+          f"top score {candidates[0]['name_score']} ({candidates[0]['distance_km']} km away)")
+
+    resolved = call(args.api, f"/analyst/recovery/missing/{missing['id']}/resolve", method="POST",
+                    token=token, form={"matched_person_id": found["id"]})
+    assert resolved["status"] == "resolved" and resolved["matched_person_id"] == found["id"]
+    still_open = call(args.api, "/analyst/recovery/missing?report_type=found", token=token)
+    assert not any(p["id"] == found["id"] for p in still_open), (
+        "resolving a missing/found pair should close both sides, but the matched found-report is still open"
+    )
+    print(f"   missing report {missing['id'][:8]} resolved against found report {found['id'][:8]} — both closed")
+
+    print("→ Recovery: confirming the missing-person registry rejects an unauthenticated read…")
+    unauth_req = urllib.request.Request(args.api + "/analyst/recovery/missing")
+    try:
+        urllib.request.urlopen(unauth_req, timeout=10)
+        raise SystemExit("missing-person registry allowed an unauthenticated read — privacy gate is broken")
+    except urllib.error.HTTPError as exc:
+        assert exc.code in (401, 403), f"expected 401/403 without a token, got HTTP {exc.code}"
+        print(f"   confirmed: unauthenticated read rejected with HTTP {exc.code}")
+
+    purge_result = call(args.api, "/analyst/recovery/missing/purge-expired", method="POST", token=token)
+    still_there = call(args.api, "/analyst/recovery/missing?report_type=missing", token=token)
+    assert not any(p["id"] == missing["id"] for p in still_there), (
+        "the missing report should be gone from the open list (it was resolved above), not because it "
+        "was purged — a fresh drill-created row must never be caught by the retention window"
+    )
+    print(f"   retention purge ran (purged={purge_result['purged']}); today's drill rows untouched")
 
     chain = call(args.api, "/analyst/audit/verify", token=token)
     print(f"→ Audit chain: intact={chain['intact']} over {chain['entries_checked']} entries")

@@ -2,12 +2,14 @@
 
 import { useState } from "react";
 import useSWR from "swr";
-import { getJSON, postJSON } from "@/lib/api";
+import { getJSON, postFormAuth, postJSON } from "@/lib/api";
 import {
   ALERT_TIER_COLORS,
   ALERT_TIER_LABELS,
   HAZARD_COLORS,
   HAZARD_LABELS,
+  SEVERITY_COLORS,
+  SEVERITY_LABELS,
   STATUS_COLORS,
   STATUS_LABELS,
 } from "@/lib/palette";
@@ -44,6 +46,15 @@ function TierChip({ tier }: { tier: string }) {
     <span className="chip">
       <span className="dot" style={{ background: ALERT_TIER_COLORS[tier] || "#898781" }} />
       {ALERT_TIER_LABELS[tier] || tier}
+    </span>
+  );
+}
+
+function SeverityChip({ severity }: { severity: string }) {
+  return (
+    <span className="chip">
+      <span className="dot" style={{ background: SEVERITY_COLORS[severity] || "#898781" }} />
+      {SEVERITY_LABELS[severity] || severity}
     </span>
   );
 }
@@ -351,6 +362,173 @@ function Narratives({ token }: { token: string }) {
   );
 }
 
+function Recovery({ token }: { token: string }) {
+  const fetcher = (path: string) => getJSON(path, token);
+  const { data: damage, mutate: refreshDamage } = useSWR("/analyst/recovery/damage?hours=72", fetcher, {
+    refreshInterval: 30_000,
+  });
+  const { data: reliefRequests, mutate: refreshRelief } = useSWR(
+    "/analyst/recovery/relief-requests", fetcher, { refreshInterval: 30_000 }
+  );
+  const { data: aidOffers, mutate: refreshOffers } = useSWR(
+    "/analyst/recovery/aid-offers", fetcher, { refreshInterval: 30_000 }
+  );
+  const { data: matches, mutate: refreshMatches } = useSWR(
+    "/analyst/recovery/aid-matches", fetcher, { refreshInterval: 30_000 }
+  );
+  const { data: missing, mutate: refreshMissing } = useSWR(
+    "/analyst/recovery/missing", fetcher, { refreshInterval: 30_000 }
+  );
+  const [candidatesFor, setCandidatesFor] = useState<string | null>(null);
+  const [candidates, setCandidates] = useState<any[]>([]);
+
+  const refreshAid = () => {
+    refreshRelief();
+    refreshOffers();
+    refreshMatches();
+  };
+
+  async function reviewDamage(id: string) {
+    await postJSON(`/analyst/recovery/damage/${id}/review`, {}, token);
+    refreshDamage();
+  }
+
+  async function fulfillRequest(id: string) {
+    const fulfilledBy = window.prompt("Fulfilled by (org/volunteer name, optional):") || "";
+    await postFormAuth(`/analyst/recovery/relief-requests/${id}/fulfill`,
+      fulfilledBy ? { fulfilled_by: fulfilledBy } : {}, token);
+    refreshAid();
+  }
+
+  async function closeOffer(id: string) {
+    await postJSON(`/analyst/recovery/aid-offers/${id}/close`, {}, token);
+    refreshAid();
+  }
+
+  async function loadCandidates(id: string) {
+    if (candidatesFor === id) {
+      setCandidatesFor(null);
+      return;
+    }
+    const rows = await getJSON(`/analyst/recovery/missing/${id}/matches`, token);
+    setCandidatesFor(id);
+    setCandidates(rows);
+  }
+
+  async function resolveMissing(id: string, matchedId?: string) {
+    await postFormAuth(`/analyst/recovery/missing/${id}/resolve`,
+      matchedId ? { matched_person_id: matchedId } : {}, token);
+    setCandidatesFor(null);
+    refreshMissing();
+  }
+
+  const requestById: Record<string, any> = {};
+  for (const r of reliefRequests || []) requestById[r.id] = r;
+  const offerById: Record<string, any> = {};
+  for (const o of aidOffers || []) offerById[o.id] = o;
+
+  return (
+    <div className="card">
+      <h3 style={{ margin: 0 }}>Recovery</h3>
+
+      <div style={{ marginTop: 10 }}>
+        <h4 style={{ margin: "0 0 6px" }}>Damage assessments (last 72h)</h4>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {(damage || []).map((d: any) => (
+            <div key={d.id} style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 8,
+                                     display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span>
+                <SeverityChip severity={d.severity} /> {d.damage_class.replace(/_/g, " ")}{" "}
+                <span style={{ fontSize: 11, color: "var(--muted)" }}>
+                  ({d.cv_mode}, {Math.round(d.cv_confidence * 100)}% confidence)
+                </span>
+              </span>
+              {d.status === "submitted" ? (
+                <button onClick={() => reviewDamage(d.id)}>Mark reviewed</button>
+              ) : (
+                <span className="chip">reviewed</span>
+              )}
+            </div>
+          ))}
+          {(damage || []).length === 0 && <p style={{ color: "var(--muted)" }}>No damage assessments yet.</p>}
+        </div>
+      </div>
+
+      <div style={{ marginTop: 14 }}>
+        <h4 style={{ margin: "0 0 6px" }}>Mutual-aid board</h4>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {(matches || []).map((m: any, i: number) => {
+            const req = requestById[m.request_id];
+            const offer = offerById[m.offer_id];
+            if (!req || !offer) return null;
+            return (
+              <div key={i} style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span>
+                    <span className="chip">{m.category}</span> request for {req.people_count ?? "?"} people
+                    {" "}↔ offer capacity {offer.capacity ?? "?"} · {m.distance_km} km apart
+                  </span>
+                  <span style={{ display: "flex", gap: 6 }}>
+                    <button className="good" onClick={() => fulfillRequest(req.id)}>Fulfill request</button>
+                    <button onClick={() => closeOffer(offer.id)}>Close offer</button>
+                  </span>
+                </div>
+                {req.description && <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>"{req.description}"</p>}
+              </div>
+            );
+          })}
+          {(matches || []).length === 0 && (
+            <p style={{ color: "var(--muted)" }}>
+              No matches — {(reliefRequests || []).length} open request(s), {(aidOffers || []).length} open offer(s).
+            </p>
+          )}
+        </div>
+      </div>
+
+      <div style={{ marginTop: 14 }}>
+        <h4 style={{ margin: "0 0 6px" }}>Missing / found persons</h4>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {(missing || []).map((p: any) => (
+            <div key={p.id} style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 8 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span>
+                  <span className="chip">{p.report_type}</span> {p.name}
+                  {p.age != null && ` (${p.age})`}
+                </span>
+                <span style={{ display: "flex", gap: 6 }}>
+                  <button onClick={() => loadCandidates(p.id)}>
+                    {candidatesFor === p.id ? "Hide matches" : "Find matches"}
+                  </button>
+                  <button onClick={() => resolveMissing(p.id)}>Resolve (no match)</button>
+                </span>
+              </div>
+              {p.description && <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>{p.description}</p>}
+              {candidatesFor === p.id && (
+                <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 4 }}>
+                  {candidates.map((c) => (
+                    <div key={c.candidate_id} style={{ display: "flex", justifyContent: "space-between",
+                                                        alignItems: "center", fontSize: 12 }}>
+                      <span>
+                        {c.candidate_name} · name score {c.name_score}
+                        {c.distance_km != null ? ` · ${c.distance_km} km away` : ""}
+                      </span>
+                      <button className="good" onClick={() => resolveMissing(p.id, c.candidate_id)}>
+                        Resolve as match
+                      </button>
+                    </div>
+                  ))}
+                  {candidates.length === 0 && <span style={{ fontSize: 12, color: "var(--muted)" }}>No candidates.</span>}
+                </div>
+              )}
+            </div>
+          ))}
+          {(missing || []).length === 0 && <p style={{ color: "var(--muted)" }}>No open missing/found reports.</p>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function AnalystDashboard() {
   const [token, setToken] = useState<string | null>(() =>
     typeof window === "undefined" ? null : localStorage.getItem("oceanping-analyst-token")
@@ -551,6 +729,7 @@ export default function AnalystDashboard() {
         <Forecasts token={token} />
         <Narratives token={token} />
         <Sitreps token={token} />
+        <Recovery token={token} />
       </div>
 
       <div className="card" style={{ alignSelf: "start", position: "sticky", top: 65 }}>

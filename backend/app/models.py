@@ -37,6 +37,9 @@ HAZARD_TYPES = [
 
 REPORT_STATUSES = ["unverified", "corroborated", "verified", "rejected"]
 
+RELIEF_CATEGORIES = ["water", "food", "medical", "shelter", "other"]
+MISSING_PERSON_TYPES = ["missing", "found"]
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -497,6 +500,119 @@ class NarrativeDelivery(Base):
     attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class DamageAssessment(Base):
+    """Post-disaster damage assessment (phase 3, milestone 7): a photo taken
+    after an event, run through a coarse CV triage (see
+    modules/recovery/cv.py) that derives real signal from the actual pixels —
+    classical brightness/hue/edge-density heuristics, not a trained damage
+    classifier. `cv_mode` records which path produced the result (`heuristic`
+    always in this environment; `heuristic+yolo` if a real object detector is
+    ever installed — see cv.py's lazy-load). Deliberately not tied to a
+    `Report`: a damage assessment is a statement about a *place* after the
+    fact, not a hazard observation feeding the confidence/incident pipeline."""
+    __tablename__ = "damage_assessments"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=new_uuid)
+    reporter_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("reporters.id"), index=True)
+    lat: Mapped[float] = mapped_column(Float)
+    lon: Mapped[float] = mapped_column(Float)
+    geom = mapped_column(Geometry(geometry_type="POINT", srid=4326))
+    h3_cell: Mapped[str] = mapped_column(String(16), index=True)
+    photo_path: Mapped[str] = mapped_column(String(512))
+    phash: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    damage_class: Mapped[str] = mapped_column(String(32))  # flooding | structural_or_debris | minor_or_none
+    severity: Mapped[str] = mapped_column(String(16))  # minor | moderate | severe | destroyed
+    cv_confidence: Mapped[float] = mapped_column(Float)
+    cv_mode: Mapped[str] = mapped_column(String(16))  # heuristic | heuristic+yolo
+    cv_detail: Mapped[dict] = mapped_column(JSONB, default=dict)
+    status: Mapped[str] = mapped_column(String(16), default="submitted", index=True)  # submitted | reviewed
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+    reporter: Mapped[Reporter] = relationship()
+
+
+class ReliefRequest(Base):
+    """A request for aid after an event — its own table (not a Report) since
+    "I need water" is a needs statement, not a hazard observation. Matched
+    against open AidOffers by category + proximity (see
+    modules/recovery/engine.py::match_aid); a match is only ever a suggestion
+    surfaced to a human, never an automatic fulfillment."""
+    __tablename__ = "relief_requests"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=new_uuid)
+    reporter_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("reporters.id"), index=True)
+    lat: Mapped[float] = mapped_column(Float)
+    lon: Mapped[float] = mapped_column(Float)
+    geom = mapped_column(Geometry(geometry_type="POINT", srid=4326))
+    h3_cell: Mapped[str] = mapped_column(String(16), index=True)
+    category: Mapped[str] = mapped_column(String(16), index=True)  # water | food | medical | shelter | other
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    people_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="open", index=True)  # open | fulfilled | cancelled
+    fulfilled_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    fulfilled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+    reporter: Mapped[Reporter] = relationship()
+
+
+class AidOffer(Base):
+    """The other half of the mutual-aid board: what a volunteer/org can give,
+    matched against open ReliefRequests the same way (see engine.py::match_aid)."""
+    __tablename__ = "aid_offers"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=new_uuid)
+    reporter_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("reporters.id"), index=True)
+    lat: Mapped[float] = mapped_column(Float)
+    lon: Mapped[float] = mapped_column(Float)
+    geom = mapped_column(Geometry(geometry_type="POINT", srid=4326))
+    h3_cell: Mapped[str] = mapped_column(String(16), index=True)
+    category: Mapped[str] = mapped_column(String(16), index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    capacity: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="open", index=True)  # open | closed
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+    reporter: Mapped[Reporter] = relationship()
+
+
+class MissingPerson(Base):
+    """Missing/found-person registry (phase 3, milestone 7). Strict privacy by
+    construction: submission is public (a family member reporting someone
+    missing must never sit behind a login, same reasoning as Report/
+    SafetyCheckin), but every read path is analyst-only — see
+    modules/recovery/router.py. `matched_person_id` cross-links a resolved
+    missing/found pair once an analyst confirms a fuzzy-name candidate match
+    (see engine.py::fuzzy_name_score) — matching is always analyst-confirmed,
+    never automatic, since misidentifying a person is a much worse failure
+    mode than a missed match. Retention is enforced by
+    modules/recovery/service.py::purge_expired_missing_persons (a scheduled
+    job, not just a policy on paper) — see recovery_missing_person_retention_days."""
+    __tablename__ = "missing_persons"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=new_uuid)
+    reporter_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("reporters.id"), index=True)
+    report_type: Mapped[str] = mapped_column(String(8), index=True)  # missing | found
+    name: Mapped[str] = mapped_column(String(256))
+    age: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    gender: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lat: Mapped[float | None] = mapped_column(Float, nullable=True)
+    lon: Mapped[float | None] = mapped_column(Float, nullable=True)
+    h3_cell: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    photo_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="open", index=True)  # open | resolved
+    matched_person_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("missing_persons.id"), nullable=True
+    )
+    resolved_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+    reporter: Mapped[Reporter] = relationship()
+
+
 Index("ix_reports_cell_time", Report.h3_cell, Report.created_at)
 Index("ix_readings_station_var_time", SensorReading.station_id, SensorReading.variable, SensorReading.time)
 Index("ix_subscriptions_channel_address", Subscription.channel, Subscription.address, unique=True)
@@ -515,3 +631,7 @@ Index("ix_safety_checkins_status_observed", SafetyCheckin.status, SafetyCheckin.
 # scoring/audit.py's advisory lock is what stops the race in the first place;
 # this is the backstop if that is ever bypassed or wrong.
 Index("ix_audit_log_prev_hash", AuditLog.prev_hash, unique=True)
+Index("ix_damage_assessments_cell_created", DamageAssessment.h3_cell, DamageAssessment.created_at)
+Index("ix_relief_requests_status_category", ReliefRequest.status, ReliefRequest.category)
+Index("ix_aid_offers_status_category", AidOffer.status, AidOffer.category)
+Index("ix_missing_persons_status_type", MissingPerson.status, MissingPerson.report_type)

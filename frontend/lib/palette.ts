@@ -53,6 +53,23 @@ export const ALERT_TIER_LABELS: Record<string, string> = {
   warning: "Warning",
 };
 
+// Damage-assessment severity (phase 3, milestone 7) — a fourth-step scale
+// deliberately distinct from STATUS/ALERT_TIER so a damage severity can never
+// be mistaken for a report status or an alert tier at a glance.
+export const SEVERITY_COLORS: Record<string, string> = {
+  minor: "#898781",
+  moderate: "#fab219",
+  severe: "#d95926",
+  destroyed: "#d03b3b",
+};
+
+export const SEVERITY_LABELS: Record<string, string> = {
+  minor: "Minor",
+  moderate: "Moderate",
+  severe: "Severe",
+  destroyed: "Destroyed",
+};
+
 export const INK = {
   primary: "#ffffff",
   secondary: "#c3c2b7",

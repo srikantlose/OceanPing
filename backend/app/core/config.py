@@ -244,6 +244,30 @@ class Settings(BaseSettings):
     # anomaly detection would treat it as the freshest sample forever.
     iot_max_future_skew_minutes: float = 5.0
 
+    # Recovery module (phase 3, milestone 7): post-disaster damage assessment,
+    # mutual-aid board, and the missing/found-person registry (see
+    # modules/recovery/). Mutual-aid matching is a live proximity+category
+    # scan over currently-open requests/offers (pilot volumes are small enough
+    # this needs no background job — see engine.py::match_aid).
+    recovery_mutual_aid_max_km: float = 5.0
+    # Fuzzy name-similarity floor (difflib.SequenceMatcher ratio, stdlib —
+    # see engine.py::fuzzy_name_score) before a missing/found pair is even
+    # surfaced as a *candidate* to an analyst; resolution is always a human
+    # decision, this only controls what's worth showing them.
+    recovery_missing_match_threshold: float = 0.72
+    # If both entries carry a location, a candidate beyond this radius is
+    # dropped even with a strong name match — "Ramesh" found 400km away from
+    # where "Ramesh" went missing is almost certainly a different person.
+    # Entries missing a location (phone-only reports) skip this gate.
+    recovery_missing_match_max_km: float = 25.0
+    # Privacy retention (phase 3, milestone 7's named "strict privacy...
+    # retention limit"): missing/found-person rows carry a name, description,
+    # and often a photo of an identifiable, often vulnerable person, and this
+    # registry has no purpose once a case is old — see
+    # recovery/service.py::purge_expired_missing_persons, a real scheduled
+    # job, not just a documented policy.
+    recovery_missing_person_retention_days: float = 180.0
+
     class Config:
         env_file = ".env"
         extra = "ignore"
