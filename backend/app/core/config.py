@@ -225,6 +225,25 @@ class Settings(BaseSettings):
     # enough that backdating can't reach an unrelated event.
     offline_max_report_age_hours: float = 24.0
 
+    # LoRaWAN / IoT pilot (phase 3, milestone 6): a real EMQX MQTT broker feeds
+    # the same sensor_readings hypertable and anomaly path as ERDDAP — a node
+    # is just a Station with provider "iot" (see modules/iot/). The bridge
+    # process (python -m app.modules.iot.bridge) subscribes to
+    # `mqtt_topic` and writes what it receives. Anonymous access is fine for a
+    # single-node pilot broker on a private network; a real deployment would
+    # put per-node credentials + TLS in front (the paho client already takes
+    # username/password, wired from these settings when set).
+    mqtt_host: str = "emqx"
+    mqtt_port: int = 1883
+    mqtt_topic: str = "oceanping/iot/+/telemetry"
+    mqtt_username: str = ""
+    mqtt_password: str = ""
+    mqtt_client_id: str = "oceanping-iot-bridge"
+    # A reading timestamped further ahead than this (clock skew on a cheap
+    # node) is pinned to now, so a bad clock can't park a future reading where
+    # anomaly detection would treat it as the freshest sample forever.
+    iot_max_future_skew_minutes: float = 5.0
+
     class Config:
         env_file = ".env"
         extra = "ignore"

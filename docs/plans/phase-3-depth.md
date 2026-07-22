@@ -2,7 +2,8 @@
 
 **Status: 🟡 in progress.** Milestones 1 (inundation model), 2 (auto-SITREPs), 3
 (forecasting + propagation pre-alerts), 4 (rumor tracker + alert drafting), and 5
-(mobile app with an offline-first queue) built — see their "as built" sections below.
+(mobile app with an offline-first queue) built; milestone 6's LoRaWAN IoT pilot built &
+live-verified (CoastSnap half deferred) — see their "as built" sections below.
 Prereqs: phases 1–2 (alerts, delivery, satellite, routing), both done.
 **Independent items**: inundation model, auto-SITREPs, CoastSnap/IoT pilot, drill scale-up.
 
@@ -593,6 +594,70 @@ data-prep step, not credentials.
   is a known breaker, so the screens are verified by a clean typecheck rather
   than by running them.
 
+## Milestone 6 — as built (IoT pilot; CoastSnap deferred)
+
+This milestone bundles two independent "physical edge" features. The **LoRaWAN
+IoT pilot** is built and live-verified; **CoastSnap** is deliberately deferred
+within the milestone (rationale at the end).
+
+- **New module `modules/iot/`** turns a real MQTT feed into rows in the
+  existing sensor tables, on the plan's own principle that *a node is just a
+  Station with provider `iot`*. There is deliberately **no IoT-specific
+  anomaly or scoring code**: readings land in the same `sensor_readings`
+  hypertable ERDDAP writes to, and the existing `detect_anomalies` +
+  confidence-scoring paths pick them up unchanged. The proof that this is real
+  reuse and not a parallel path is that the milestone added zero lines to
+  `scoring/` or `sensors/anomaly.py`.
+- **A real broker, not a stub**: EMQX 5.8 (open-source, anonymous access is
+  fine for a single-node pilot on a private network) runs as a compose
+  service, alongside a new `iot-bridge` service (`python -m
+  app.modules.iot.bridge`, built from the same backend image, structured like
+  the delivery worker — its own process, no shared state, restartable freely).
+  This is the same "real infrastructure gated on reachability, not
+  credentials" posture as Valhalla in phase 2.
+- **`parser.py` is pure** (`parse_telemetry(topic, payload) -> Telemetry`),
+  so the entire wire contract is unit-tested without a broker: topic
+  `oceanping/iot/<node_id>/telemetry`, JSON payload with optional `name`/
+  `lat`/`lon` and a non-empty `readings` list. It rejects malformed node ids
+  (empty, or smuggling extra `/` segments past the one-level topic space),
+  out-of-range coordinates, non-numeric values, and unparseable times; a
+  missing reading time means "now", and a future time is clamped to a small
+  skew ceiling so a cheap node's wrong clock can't park a reading where
+  anomaly detection would treat it as the freshest sample forever.
+- **`service.py::ingest_telemetry`** upserts the station (creating it with
+  provider `iot` on first contact — which requires a location, since we can't
+  place a node we've never heard of, while a known node may stream readings
+  with no coords and just refresh its liveness/position), keeps the station's
+  variable list a superset of everything it has reported, forwards readings
+  through the existing `sensors.insert_readings`, and audit-logs a
+  `iot.node_registered` event on first registration only. IoT nodes surface on
+  the map through the existing `/map/stations` endpoint with no change — a
+  node *is* a station.
+- **The bridge is defensive**: one flaky node's malformed payload (bad JSON,
+  invalid telemetry, or a first-ever message with no location) is logged and
+  dropped, never allowed to crash the bridge or block other nodes' data.
+- **Live-verified end to end** — `scripts/iot/iot_live_check.py` publishes a
+  7-day hourly baseline plus a surge over **real MQTT** to EMQX and asserts
+  the node self-registered as an `iot` Station, was placed at its reported
+  location, showed the surge as its latest reading, and — after a
+  `/drill/tick` runs the same anomaly detector the scheduler uses — drove a
+  genuine water-level anomaly (z=34.04) with no IoT-specific code involved.
+  The audit chain stayed intact (757 entries) with the node registration
+  logged. Since the drill is stdlib-only and the host may lack an MQTT client,
+  this lives in its own script (`pip install paho-mqtt`), the same split as
+  `mobile/tests/live.integration.ts`. 417 backend tests passing (up from 394),
+  including 23 new IoT parser/service unit tests.
+- **CoastSnap deferred (honest scope cut, not an oversight)**: fixed-position
+  shoreline cameras need genuine paired frames (a fixed cradle photographing
+  the same view over weeks) and pixel-accurate waterline extraction to produce
+  a real erosion series. This environment has no such imagery to verify
+  against, and a synthetic-frame stand-in would be illustrative rather than
+  real — the same reason the satellite scene-scoring recipe stayed a stub in
+  phase 2, and unlike the DEM/OSM/EMQX pieces which are genuinely real here.
+  The `coastsnap_stations`/`coastsnap_frames` tables named in "Data model
+  changes" are therefore not built yet; the IoT half is the real, verifiable
+  slice of this milestone's "physical edge."
+
 ## Milestones
 
 1. Inundation model + alert/routing wiring (independent) — ✅ built, see above
@@ -600,7 +665,7 @@ data-prep step, not credentials.
 3. Forecasting + propagation pre-alerts — ✅ built, see above
 4. Rumor tracker + alert drafting — ✅ built, see above
 5. Mobile app with offline queue (mesh spike separate) — ✅ built, see above
-6. CoastSnap + IoT pilot in one district
+6. CoastSnap + IoT pilot in one district — 🟡 IoT pilot built & live-verified; CoastSnap deferred (see above)
 7. Recovery module
 8. Service split + 50× drill exit test
 
@@ -631,6 +696,10 @@ data-prep step, not credentials.
   and the same assertions in `scripts/drill.py`.
 - Mark Safe: a check-in reaches responders and never enters the hazard/scoring path.
   ✅ `test_safety_service.py`, plus a live check in `scripts/drill.py`.
+- IoT pilot: a reading published over real MQTT self-registers an `iot` station and drives
+  the existing anomaly detector with no IoT-specific scoring. ✅ `test_iot_parser.py` +
+  `test_iot_service.py` (23), plus a real-broker live check in `scripts/iot/iot_live_check.py`
+  (surge published to EMQX → node registered → anomaly z=34 via the shared path).
 - Audit chain under concurrency: parallel writers must never fork the chain.
   ✅ `test_audit_chain.py` (lock-before-read ordering, no row-level tail lock, and the
   UNIQUE prev_hash backstop), plus a live 12-worker concurrent-write check.

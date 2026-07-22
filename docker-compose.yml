@@ -73,6 +73,38 @@ services:
     ports:
       - "8002:8002"
 
+  # LoRaWAN / IoT pilot (phase 3, milestone 6). A real MQTT broker, not a
+  # stub — EMQX is open-source and needs no credentials for a single-node
+  # pilot on a private network. Nodes publish to oceanping/iot/<node>/telemetry
+  # and the iot-bridge below turns that into rows in sensor_readings.
+  emqx:
+    image: emqx/emqx:5.8
+    environment:
+      EMQX_ALLOW_ANONYMOUS: "true"
+    ports:
+      - "1883:1883"    # MQTT
+      - "18083:18083"  # dashboard (admin/public)
+    healthcheck:
+      test: ["CMD", "/opt/emqx/bin/emqx", "ctl", "status"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  iot-bridge:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://oceanping:oceanping@db:5432/oceanping
+      MQTT_HOST: ${MQTT_HOST:-emqx}
+      MQTT_PORT: ${MQTT_PORT:-1883}
+      MQTT_USERNAME: ${MQTT_USERNAME:-}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
+    command: python -m app.modules.iot.bridge
+
   worker:
     build: ./backend
     environment:
