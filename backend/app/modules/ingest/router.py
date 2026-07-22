@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime
 from typing import Annotated
 
@@ -6,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.db import get_db
-from app.models import HAZARD_TYPES
+from app.models import HAZARD_TYPES, Report
 from app.modules.ingest.schemas import ReportOut
 from app.modules.ingest.service import (
     RateLimited,
@@ -21,6 +22,19 @@ router = APIRouter(tags=["ingest"])
 @router.get("/hazard-types")
 def hazard_types() -> list[str]:
     return HAZARD_TYPES
+
+
+@router.get("/reports/{report_id}", response_model=ReportOut)
+def get_report(report_id: uuid.UUID, db: Session = Depends(get_db)) -> ReportOut:
+    """Public, same fields POST /reports already hands the submitter back.
+    In bus pipeline mode (phase 3, milestone 8) a report's hazard_type/
+    confidence/incident_id are provisional until processing_stage reads
+    "scored" — this is how a caller (or a drill) observes that catch-up
+    without needing analyst credentials."""
+    report = db.get(Report, report_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return ReportOut.from_report(report)
 
 
 @router.post("/reports", response_model=ReportOut)

@@ -268,6 +268,27 @@ class Settings(BaseSettings):
     # job, not just a documented policy.
     recovery_missing_person_retention_days: float = 180.0
 
+    # The architecture split (phase 3, milestone 8): "inline" is every prior
+    # milestone's behavior, unchanged — create_report() runs NLP, dedup, and
+    # scoring synchronously in one transaction, no Redpanda involved at all.
+    # "bus" splits that into a gateway (validate + rate-limit + produce) plus
+    # three independent consumer deployments (nlp/dedup/scoring, see
+    # modules/ingest/consumers/) reading a real Redpanda topic chain — see
+    # modules/ingest/bus.py. Default stays "inline" so the existing stack,
+    # every existing drill assertion, and every prior milestone's live
+    # verification keep working unchanged; "bus" is an alternate deployment
+    # mode (docker-compose.yml's "split" profile), not a hard cutover, per
+    # this milestone's own risk note about freezing behavior during a split.
+    pipeline_mode: str = "inline"
+    kafka_bootstrap_servers: str = "redpanda:9092"
+    # Consumer-group lag on reports.raw beyond which core/scheduler.py's
+    # analytics jobs (SITREPs, forecasts, narratives, satellite polling — the
+    # plan's own "analytics consumers") defer themselves for one tick, so a
+    # 50x report-ingestion surge can't starve the DB the critical ingest ->
+    # dedup -> score -> alert path also needs. Only checked when
+    # pipeline_mode is "bus"; inline mode has no lag concept and never sheds.
+    load_shed_lag_threshold: int = 500
+
     class Config:
         env_file = ".env"
         extra = "ignore"

@@ -32,6 +32,12 @@ What it does:
      near-duplicate-name found-person report and confirms the fuzzy matcher
      surfaces the pair for an analyst to resolve; confirms the registry
      rejects an unauthenticated read.
+ 11. Optional (--scale N, N>1): fires N times the drill's own baseline report
+     volume concurrently at the public gateway and confirms ingestion never
+     fails, regardless of pipeline mode (phase 3, milestone 8's 50x-load
+     exit test). Detects bus mode from the response body itself (no Kafka
+     client on the drill side) and, if detected, polls until every submitted
+     report's consumers catch up to processing_stage=scored.
 """
 import argparse
 import binascii
@@ -46,6 +52,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
 MARINA = (13.0500, 80.2824)  # Chennai Marina Beach
@@ -102,7 +109,7 @@ REPORT_TEXTS = [
 
 
 def call(api: str, path: str, *, method: str = "GET", token: str | None = None,
-         json_body: dict | None = None, form: dict | None = None) -> dict | list:
+         json_body: dict | None = None, form: dict | None = None, timeout: float = 120) -> dict | list:
     url = api + path
     headers = {}
     data = None
@@ -116,7 +123,7 @@ def call(api: str, path: str, *, method: str = "GET", token: str | None = None,
         headers["Content-Type"] = "application/x-www-form-urlencoded"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
         body = exc.read().decode(errors="replace")
@@ -192,6 +199,92 @@ def poll_deliveries(api: str, token: str, alert_id: str, attempts: int = 10, del
     return []
 
 
+LOAD_BASELINE_REPORTS = 14  # roughly this drill's own normal per-run report volume
+
+
+def run_load_scale(api: str, scale: int) -> None:
+    """Phase 3, milestone 8's 50x-load exit test: fires `scale` times the
+    drill's own baseline report volume concurrently at the public gateway and
+    confirms ingestion never fails or blocks, regardless of pipeline mode.
+    The drill has no Kafka client of its own (same stdlib-only ethos as
+    post_multipart's hand-built PNG/multipart body), so bus mode is detected
+    from the response body itself: inline mode's rows come back already
+    processing_stage="scored", bus mode's come back "queued" and need polling
+    until the three consumers catch up.
+    """
+    n = LOAD_BASELINE_REPORTS * scale
+    print(f"→ Load test: firing {n} concurrent report submissions ({scale}x baseline)…")
+
+    # The baseline scatter (a handful of points within a few hundred metres
+    # of Marina) is fine for ~14 reports, but at 50x that would jam 700
+    # reports into a couple of H3 res-8 cells (~0.7 km² each) and trip
+    # rate_limit_reports_per_cell (a real, correct defensive limit, not a
+    # pipeline bug). Spreading reports over a grid of points at least 1.2 km
+    # apart — comfortably wider than a res-8 hexagon, so each grid point maps
+    # to its own distinct cell regardless of hex/grid alignment — and capping
+    # points-per-cell at ~40 keeps this stage measuring gateway/pipeline
+    # throughput rather than re-exercising the per-cell rate limiter.
+    max_per_cell = 40
+    cells_needed = max(1, math.ceil(n / max_per_cell))
+    cols = max(1, math.ceil(math.sqrt(cells_needed)))
+    rows = max(1, math.ceil(cells_needed / cols))
+    km_per_deg_lat = 111.0
+    km_per_deg_lon = 111.0 * math.cos(math.radians(MARINA[0]))
+    lat_step = 1.2 / km_per_deg_lat
+    lon_step = 1.2 / km_per_deg_lon
+
+    def submit(i: int) -> tuple[float, dict]:
+        col, row = i % cols, (i // cols) % rows
+        lat = MARINA[0] + (col - cols / 2) * lat_step
+        lon = MARINA[1] + (row - rows / 2) * lon_step
+        form = {
+            "lat": f"{lat:.6f}", "lon": f"{lon:.6f}",
+            # A unique reporter per submission — this stage is exercising
+            # ingest throughput, not rate limiting (already covered
+            # elsewhere), and a timestamped prefix keeps back-to-back drill
+            # reruns from sharing a reporter identity within the rate
+            # limiter's 10-minute window.
+            "client_id": f"drill-load-{int(time.time())}-{i}",
+            "hazard_type": "coastal_flooding",
+            "text": "load test report: water rising fast along the coast",
+        }
+        t0 = time.monotonic()
+        rep = call(api, "/reports", method="POST", form=form, timeout=180)
+        return time.monotonic() - t0, rep
+
+    results: list[tuple[float, dict]] = []
+    errors: list[str] = []
+    with ThreadPoolExecutor(max_workers=min(32, n)) as pool:
+        futures = [pool.submit(submit, i) for i in range(n)]
+        for fut in as_completed(futures):
+            try:
+                results.append(fut.result())
+            except SystemExit as exc:
+                errors.append(str(exc))
+
+    assert not errors, f"{len(errors)} of {n} submissions failed under {scale}x load: {errors[:3]}"
+    latencies = sorted(t for t, _ in results)
+    p50 = latencies[len(latencies) // 2]
+    p95 = latencies[int(len(latencies) * 0.95)]
+    print(f"   {n} accepted, 0 failed — gateway latency p50={p50 * 1000:.0f}ms p95={p95 * 1000:.0f}ms")
+
+    reports = [r for _, r in results]
+    bus_mode = any(r["processing_stage"] != "scored" for r in reports)
+    if not bus_mode:
+        print("   pipeline_mode=inline — every report was already fully scored synchronously")
+        return
+
+    print("   pipeline_mode=bus detected — polling until every report's consumers catch up…")
+    pending = {r["id"] for r in reports}
+    deadline = time.monotonic() + max(60.0, n * 0.5)
+    while pending and time.monotonic() < deadline:
+        time.sleep(1.0)
+        pending = {rid for rid in pending if call(api, f"/reports/{rid}")["processing_stage"] != "scored"}
+    assert not pending, f"{len(pending)} of {n} reports never reached processing_stage=scored in time"
+    print(f"   all {n} reports reached processing_stage=scored — ingestion stayed available "
+          f"while the nlp/dedup/scoring consumers caught up on their own backlog")
+
+
 def main() -> None:
     # Windows consoles often default to cp1252; keep the drill output portable.
     if hasattr(sys.stdout, "reconfigure"):
@@ -200,6 +293,15 @@ def main() -> None:
     parser.add_argument("--api", default="http://localhost:8000")
     parser.add_argument("--username", default="analyst")
     parser.add_argument("--password", default="oceanping-dev")
+    parser.add_argument("--scale", type=int, default=1,
+                        help="Fire this many times the baseline report volume at the gateway as a final "
+                             "load-test stage (phase 3, milestone 8's 50x exit test). 1 (default) skips it.")
+    parser.add_argument("--load-only", action="store_true",
+                        help="Skip every other scenario and just run the --scale load stage. The rest of "
+                             "this drill assumes synchronous scoring (inline pipeline mode) throughout, so "
+                             "this is also how to exercise the load stage against pipeline_mode=bus without "
+                             "tripping unrelated assertions that eventual consistency would race — see "
+                             "scripts/bus_pipeline_check.py for bus mode's own correctness checks.")
     args = parser.parse_args()
     rng = random.Random(42)
 
@@ -209,6 +311,17 @@ def main() -> None:
     print("→ Logging in as analyst…")
     token = call(args.api, "/auth/login", method="POST",
                  json_body={"username": args.username, "password": args.password})["token"]
+
+    if args.load_only:
+        if args.scale <= 1:
+            raise SystemExit("--load-only requires --scale > 1")
+        run_load_scale(args.api, args.scale)
+        chain = call(args.api, "/analyst/audit/verify", token=token)
+        print(f"→ Audit chain: intact={chain['intact']} over {chain['entries_checked']} entries")
+        if not chain["intact"]:
+            sys.exit("AUDIT CHAIN BROKEN")
+        print("✓ Load-only drill complete.")
+        return
 
     print("→ Injecting 7 days of calm baseline + a surge spike at the drill tide gauge…")
     now = datetime.now(timezone.utc)
@@ -730,6 +843,9 @@ def main() -> None:
         "was purged — a fresh drill-created row must never be caught by the retention window"
     )
     print(f"   retention purge ran (purged={purge_result['purged']}); today's drill rows untouched")
+
+    if args.scale > 1:
+        run_load_scale(args.api, args.scale)
 
     chain = call(args.api, "/analyst/audit/verify", token=token)
     print(f"→ Audit chain: intact={chain['intact']} over {chain['entries_checked']} entries")

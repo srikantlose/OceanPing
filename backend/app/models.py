@@ -100,6 +100,19 @@ class Report(Base):
     lang: Mapped[str] = mapped_column(String(8), default="und")
     source: Mapped[str] = mapped_column(String(16))  # telegram | web | drill
     status: Mapped[str] = mapped_column(String(16), default="unverified", index=True)
+    # Bus pipeline mode only (phase 3, milestone 8): which stage of the
+    # nlp -> dedup -> scoring consumer chain has completed for this report.
+    # Always "scored" in inline mode (the default) and for every row created
+    # before this milestone — inline mode does all three steps synchronously
+    # before the row is ever visible, so there's nothing to observe mid-flight.
+    processing_stage: Mapped[str] = mapped_column(String(16), default="scored", index=True)
+    # Bus mode only: True once hazard_type is final and must never be
+    # overwritten by the nlp consumer — either the reporter's own explicit
+    # pick (mirrors create_report()'s longstanding "user's explicit pick
+    # wins"), or the nlp consumer has already classified it. False means
+    # hazard_type is still the "other" placeholder the gateway wrote pending
+    # real classification. Always True in inline mode (nothing ever reads it).
+    hazard_locked: Mapped[bool] = mapped_column(Boolean, default=True)
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
     confidence_components: Mapped[dict] = mapped_column(JSONB, default=dict)
     embedding: Mapped[list | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)

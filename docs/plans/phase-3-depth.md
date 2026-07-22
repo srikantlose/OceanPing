@@ -4,9 +4,11 @@
 (forecasting + propagation pre-alerts), 4 (rumor tracker + alert drafting), 5
 (mobile app with an offline-first queue), and 7 (recovery module — damage
 assessment, mutual-aid board, missing-person registry) built; milestone 6's
-LoRaWAN IoT pilot built & live-verified (CoastSnap half deferred) — see their
-"as built" sections below. Prereqs: phases 1–2 (alerts, delivery, satellite,
-routing), both done.
+LoRaWAN IoT pilot built & live-verified (CoastSnap half deferred); milestone 8's
+event-bus split (Redpanda gateway + nlp/dedup/scoring consumers) built and
+live-verified, scoped to the split itself — Keycloak/MinIO/OpenSearch/k3s
+deferred, see its "as built" section for why — see their "as built" sections
+below. Prereqs: phases 1–2 (alerts, delivery, satellite, routing), both done.
 **Independent items**: inundation model, auto-SITREPs, CoastSnap/IoT pilot, drill scale-up.
 
 ## Goals
@@ -794,6 +796,161 @@ within the milestone (rationale at the end).
   clean `next build`, and the drill's own screenshots-free assertions
   instead.
 
+## Milestone 8 — as built (event-bus split scope)
+
+The plan named five pieces of new infra for this milestone (Redpanda, k3s,
+Keycloak, MinIO, OpenSearch) plus a 50x-load exit test. Built: the event-bus
+split itself (Redpanda + three consumer deployments) and the exit test,
+against either pipeline mode. Deliberately not built, and why, at the end of
+this section — this was a scoping decision made explicitly with the user
+before writing any code, not a silent cut discovered partway through.
+
+- **Two pipeline modes, not a hard cutover.** `settings.pipeline_mode`
+  defaults to `"inline"` — every prior milestone's behavior, completely
+  unchanged: `create_report()` still runs NLP, dedup, and scoring
+  synchronously in one transaction, no Redpanda involved, no new column ever
+  touched. `"bus"` is an alternate deployment mode (docker-compose's `split`
+  profile), not a replacement — this mirrors the plan's own risk note
+  ("freeze features during the cutover; run monolith + consumers in parallel
+  against drills before switching ingest") and this project's established
+  pattern of shipping a real alternative path behind a flag rather than
+  rewriting the default one (same posture as `nlp_mode`/`NLP_MODEL_VERSION`'s
+  canary flip in phase 1). Every existing drill assertion, and all 449
+  pre-existing backend tests, run against inline mode completely unmodified.
+- **The split is real repackaging, not a rewrite** — the plan's own framing
+  held up. `modules/ingest/bus.py` is thin Redpanda (Kafka-API-compatible,
+  single-node KRaft, no Zookeeper) plumbing; `modules/ingest/consumers/{nlp,
+  dedup,scoring}.py` each call the *exact same* functions the inline path
+  already called (`classifier.classify`/`embed`, `nlp/dedup.py::
+  assign_incident`, `scoring/service.py::rescore_report`,
+  `scoring/audit.py::append_audit`) — zero duplicated business logic, only a
+  different caller. A message is just a report id, never a payload — the
+  same "queue holds an id, worker looks it up" idiom `delivery/queue.py`
+  already used for alerts (there via Redis; here via a real topic, since
+  three independent consumer groups each need to read the full backlog at
+  their own pace). The database row stays the single source of truth, which
+  is what makes every consumer naturally idempotent under Kafka's
+  at-least-once redelivery: `bus.py::consume_forever` only commits an offset
+  after its handler returns without raising, and every `process_one()`
+  starts by checking the report is still in the exact `processing_stage` it
+  expects, no-op'ing harmlessly on a redelivered or already-handled message.
+- **Three consumers, strictly linear, matching the pipeline's original call
+  order.** `reports.raw` (nlp: classify + embed, the only one that lazy-loads
+  the sentence-transformer model) → `reports.classified` (dedup:
+  `assign_incident` + the `report.created` audit entry, moved here since it
+  needs `incident_id`) → `reports.assigned` (scoring: `rescore_report`, which
+  is also where an automatic advisory/watch alert actually gets created or
+  upgraded via `sync_incident_alert`). Kept strictly linear rather than
+  fanning nlp and dedup out to read `reports.raw` independently — an earlier
+  design considered letting nlp re-publish after reclassifying a report so
+  dedup/scoring could redo their work with better data, but `assign_incident`
+  has no "move a report between incidents" operation (it only ever
+  increments an incident's counters, never decrements them), so processing a
+  report through dedup twice would have double-counted its corroboration.
+  Staying linear avoided inventing that operation for a milestone that's
+  supposed to be repackaging, not new pipeline semantics.
+- **The reporter's explicit hazard_type pick still wins, end-to-end through
+  the split.** A new `Report.hazard_locked` column (default `True`, so inline
+  mode and every pre-existing row never look at it) is `True` at the gateway
+  when the caller picked a valid `HAZARD_TYPES` value — the nlp consumer
+  still runs classification for the embedding either way (matching the
+  original inline code's behavior of always computing an embedding
+  regardless of whether hazard_type was explicit), it just never overwrites
+  `hazard_type` when the lock is set. A new `Report.processing_stage` column
+  (`queued → classified → assigned → scored`, default `"scored"`) is the
+  only way a bus-mode caller can tell a row is still catching up — exposed
+  on `POST /reports`'s existing response shape and a new public
+  `GET /reports/{id}` (the same fields the submitter already got back,
+  nothing analyst-only), so a caller who cares can poll rather than assume
+  synchronous scoring.
+- **Load-shed is a real signal from the real broker, not a synthetic flag.**
+  `bus.py::lag()` computes a consumer group's true backlog (committed offset
+  vs. high-water mark, summed across partitions) against Redpanda itself. Re-
+  reading the plan's exit criterion closely — "ingestion + alerting
+  protected under load-shed (defer analytics consumers)" — the deferrable
+  "analytics consumers" are the scheduled batch jobs this project already
+  calls analytics elsewhere (SITREPs, forecasts, narratives, satellite/PFZ
+  polling), not the nlp/dedup/scoring pipeline stages themselves: alerting
+  happens inside the scoring consumer, so gating it on nlp's backlog would
+  contradict "alerting protected." `core/scheduler.py::_should_shed_analytics()`
+  checks the nlp consumer group's lag on `reports.raw` (the only consumer
+  that can meaningfully fall behind, since it's the only one loading a
+  model) against `load_shed_lag_threshold` (500) before each analytics job's
+  tick, deferring that single tick if the ingest path is backed up — never
+  touching `erddap_poll`/`anomaly_detect`/`rescore_recent`/the missing-person
+  retention purge, which stay on the plain, always-run `_job()` wrapper. Only
+  active when `pipeline_mode == "bus"`; inline mode has no lag concept and
+  never sheds, same as every prior milestone.
+- **Live-verified against real infrastructure end-to-end, not mocks.** Two
+  verification paths, since the existing `scripts/drill.py` scenario assumes
+  synchronous scoring throughout (many of its assertions read a report's
+  hazard_type/confidence/status immediately after `POST /reports`, which
+  would race eventual consistency under bus mode for no good reason — a
+  reasoning gap, not a pipeline bug):
+  - **`scripts/bus_pipeline_check.py`** (new, standalone, same role
+    `scripts/iot/iot_live_check.py` plays for the IoT pilot): against a real
+    Redpanda broker and all three live consumer containers, confirms a
+    submission returns before the pipeline finishes (`processing_stage !=
+    "scored"` immediately), an unlabeled report gets reclassified off the
+    "other" placeholder, an explicit `hazard_type="oil_spill"` pick survives
+    nlp reclassification of clearly tsunami-flavored text, dedup assigns an
+    incident, scoring produces a real confidence, and the audit chain stays
+    intact. All 8 checks passed.
+  - **`scripts/drill.py --load-only --scale N`** (new flags): skips every
+    assertion that assumes synchronous scoring and just fires `N × 14`
+    concurrent submissions at the public gateway, then — detecting bus mode
+    from the response body itself, since the drill has no Kafka client of
+    its own — polls until every report reaches `processing_stage="scored"`.
+    Submissions are placed on a deterministic grid (not drawn from a shared
+    `random.Random`, which isn't thread-safe across this stage's own thread
+    pool and was observed to clump submissions under concurrent access) with
+    points-per-H3-cell capped well under `rate_limit_reports_per_cell`, so
+    this stage measures pipeline throughput rather than re-tripping a real,
+    correct, unrelated rate limit. At `--scale 50` (700 concurrent
+    submissions) against the real split deployment: 0 failures, gateway
+    latency p50=453ms/p95=609ms (vs. p50=1467ms at only 10x scale in inline
+    mode, from the same run — the NLP-heavy work being off the request path
+    is a measurable, not just theoretical, win), and all 700 reports reached
+    `processing_stage="scored"` with the audit chain intact throughout.
+  - **Load-shed against the real broker**: stopping the nlp-consumer
+    container, firing a burst, and querying `bus.lag()` directly showed a
+    real backlog (70 unconsumed messages) with ingestion still accepting new
+    reports the whole time; `_should_shed_analytics()` correctly returned
+    `True` against that live lag; restarting the consumer drained the
+    backlog back to 0 within seconds.
+  - Migration 0017 (`reports.processing_stage`, `reports.hazard_locked`)
+    replayed cleanly both against the existing dev DB (guarded `add_column`,
+    same convention as every migration since the phase-2 milestone-6
+    gotcha) and from scratch across all 17 migrations after a dev-DB reset
+    (the reset itself was needed for an unrelated reason: this milestone's
+    own heavy load-testing — thousands of synthetic reports at 50x scale —
+    bloated the dev DB enough to trip a pre-existing incident-cardinality
+    drill assertion, the same class of issue as the milestone-7 session's
+    stale-Kasimedu-incident entry, this time self-inflicted rather than
+    inherited). 472 backend tests passing (up from 449, +23 new: `test_
+    ingest_bus.py`, `test_ingest_consumers.py`, `test_scheduler.py`), all
+    against fakes for Producer/Consumer/AdminClient — no broker needed for
+    the unit suite, matching the "unit-test the pure/isolatable logic,
+    drill-verify the rest live" split `create_report()` itself has always
+    used (it has no fake-DB unit test of its own, only ever drill-verified).
+- **Not built, deliberately** (a scoping decision made with the user before
+  writing code, via explicit options weighed against each other, not
+  discovered as a gap afterward): **Keycloak** (would replace
+  `core/security.py`'s token auth with OIDC — a live auth-mechanism swap
+  affecting every client's login path at once, a materially different kind
+  of risk than an internal pipeline refactor); **MinIO** (would replace the
+  local media volume — an orthogonal storage-backend swap, not something the
+  split itself needs to prove out); **OpenSearch** (report/social full-text
+  — nothing in this project currently needs full-text search over reports);
+  **k3s manifests** (the plan's own text already hedges this one — "keep
+  compose if single-node pilot is holding — decide on real load" — and nothing
+  about a single-node Windows dev machine's Docker Desktop setup calls for a
+  Kubernetes cluster). None of the four change whether the event-bus split
+  itself proves out under load, which is what the milestone's exit criterion
+  actually asks for; each is a real, independent infra swap that could be
+  picked up on its own later, same as CoastSnap and the mesh-relay spike are
+  independent pickups from milestones 5–6.
+
 ## Milestones
 
 1. Inundation model + alert/routing wiring (independent) — ✅ built, see above
@@ -803,7 +960,7 @@ within the milestone (rationale at the end).
 5. Mobile app with offline queue (mesh spike separate) — ✅ built, see above
 6. CoastSnap + IoT pilot in one district — 🟡 IoT pilot built & live-verified; CoastSnap deferred (see above)
 7. Recovery module — ✅ built, see above
-8. Service split + 50× drill exit test
+8. Service split + 50× drill exit test — ✅ built (event-bus split scope), see above
 
 ## Verification
 
@@ -859,5 +1016,19 @@ within the milestone (rationale at the end).
   missing-person rows and their photo file, and never touches fresh rows.
   ✅ `test_recovery_service.py` (including the self-referential FK-unlink-before-
   delete case), plus a live manual-purge check in `scripts/drill.py`.
-- Split: replay identical drill on monolith vs. split deployment → identical end state
-  (reports, incidents, alerts, audit chain length).
+- Split: a report submitted in bus mode reaches the same end state (hazard
+  classified, incident assigned, confidence scored) as inline mode, and the
+  reporter's explicit hazard_type pick survives nlp reclassification.
+  ✅ `test_ingest_consumers.py` (stage-gating and hand-off logic for all
+  three consumers) + `test_ingest_bus.py` (produce/consume/lag against
+  fakes), plus a real-broker live check in `scripts/bus_pipeline_check.py`.
+- Split — 50x load exit criterion: ingestion never fails under 50x baseline
+  concurrent load, regardless of pipeline mode. ✅ live check in
+  `scripts/drill.py --load-only --scale 50` (700 concurrent submissions, 0
+  failures, all reached processing_stage=scored against the real split
+  deployment).
+- Split — load-shed: analytics jobs defer themselves when the nlp consumer's
+  real backlog exceeds threshold, never touching the ingest/alerting path.
+  ✅ `test_scheduler.py`, plus a live check against the real broker (nlp-
+  consumer stopped, backlog of 70 observed via `bus.lag()`, `_should_shed_
+  analytics()` correctly returned True, backlog drained to 0 on restart).

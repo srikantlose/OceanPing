@@ -100,6 +100,68 @@ def get_or_create_reporter(db: Session, source: str, external_id: str, role: str
     return reporter
 
 
+def _attach_media(
+    db: Session,
+    report: Report,
+    media_bytes: bytes,
+    media_filename: str | None,
+    lat: float,
+    lon: float,
+    created_at: datetime,
+) -> None:
+    """Forensics are cheap file I/O (a perceptual hash, EXIF parsing), not the
+    NLP-pipeline's CPU-heavy embedding step, so this runs synchronously in the
+    gateway in both pipeline modes — there's no reason to defer it, and the
+    "media" confidence component being real from the first read the caller
+    ever sees (rather than provisional) is only a plus."""
+    path = media_mod.save_upload(media_bytes, media_filename)
+    forensics = media_mod.run_forensics(db, path, lat, lon, created_at)
+    db.add(
+        MediaAsset(
+            report_id=report.id,
+            path=str(path),
+            phash=forensics["phash"],
+            exif={**forensics["exif"], "gps_km": forensics["gps_km"],
+                  "time_offset_hours": forensics["time_offset_hours"],
+                  "reused": forensics["reused"]},
+        )
+    )
+    report.confidence_components = {
+        "media": engine.media_score(
+            has_media=True,
+            phash_reused=forensics["reused"],
+            exif_gps_km=forensics["gps_km"],
+            exif_time_offset_hours=forensics["time_offset_hours"],
+        ),
+        "media_forensics": {
+            "reused": forensics["reused"],
+            "gps_km": forensics["gps_km"],
+            "time_offset_hours": forensics["time_offset_hours"],
+        },
+    }
+
+
+def audit_report_created(db: Session, report: Report, nlp_mode: str) -> None:
+    """The report.created audit entry — fired right after incident assignment
+    in both pipeline modes (inline: still inside create_report(); bus: from
+    the dedup consumer, see consumers/dedup.py), since incident_id needs to
+    be known first."""
+    append_audit(
+        db,
+        event_type="report.created",
+        subject_type="report",
+        subject_id=str(report.id),
+        payload={
+            "source": report.source,
+            "hazard_type": report.hazard_type,
+            "h3_cell": report.h3_cell,
+            "lang": report.lang,
+            "nlp_mode": nlp_mode,
+            "incident_id": str(report.incident_id),
+        },
+    )
+
+
 def create_report(
     db: Session,
     *,
@@ -114,82 +176,83 @@ def create_report(
     created_at: datetime | None = None,
     client_key: str | None = None,
 ) -> Report:
+    """The single entry point for every channel. In the default "inline"
+    pipeline mode this runs NLP, dedup, and scoring synchronously, exactly as
+    every prior milestone built it. In "bus" mode (phase 3, milestone 8 — see
+    modules/ingest/bus.py) this function becomes just the gateway: it still
+    owns rate-limiting, the reporter, and media forensics, but classification,
+    incident assignment, and scoring instead happen in three independent
+    consumer processes reading a real Redpanda topic chain, and this function
+    returns as soon as the report is durably queued for them."""
     created_at = created_at or datetime.now(timezone.utc)
     cell = cell_for(lat, lon)
     reporter = get_or_create_reporter(db, source, external_id)
     _check_rate_limits(reporter.external_id_hash, cell)
 
+    explicit_hazard = hazard_type if hazard_type in HAZARD_TYPES else None  # user's explicit pick wins
     lang = classifier.detect_lang(text) if text else "und"
-    classification = classifier.classify(text)
-    if hazard_type in HAZARD_TYPES:
-        final_hazard = hazard_type  # user's explicit pick wins
-    else:
-        final_hazard = classification.hazard_type or "other"
-    embedding = classification.embedding
-    if embedding is None and text:
-        embedding = classifier.embed(text)
+    urgency = classifier.detect_urgency(text)
+    bus_mode = get_settings().pipeline_mode == "bus"
 
-    report = Report(
-        reporter_id=reporter.id,
-        lat=lat,
-        lon=lon,
-        geom=f"SRID=4326;POINT({lon} {lat})",
-        h3_cell=cell,
-        hazard_type=final_hazard,
-        urgency=classifier.detect_urgency(text),
-        text=text,
-        lang=lang,
-        source=source,
-        embedding=embedding,
-        client_key=client_key,
-        created_at=created_at,
-        confidence_components={"media": engine.MEDIA_NEUTRAL},
-    )
+    if bus_mode:
+        report = Report(
+            reporter_id=reporter.id,
+            lat=lat,
+            lon=lon,
+            geom=f"SRID=4326;POINT({lon} {lat})",
+            h3_cell=cell,
+            # Placeholder pending the nlp consumer, unless the reporter's own
+            # pick is already final — real classification never overwrites it.
+            hazard_type=explicit_hazard or "other",
+            hazard_locked=explicit_hazard is not None,
+            urgency=urgency,
+            text=text,
+            lang=lang,
+            source=source,
+            embedding=None,
+            client_key=client_key,
+            created_at=created_at,
+            confidence_components={"media": engine.MEDIA_NEUTRAL},
+            processing_stage="queued",
+        )
+    else:
+        classification = classifier.classify(text)
+        final_hazard = explicit_hazard or classification.hazard_type or "other"
+        embedding = classification.embedding
+        if embedding is None and text:
+            embedding = classifier.embed(text)
+        report = Report(
+            reporter_id=reporter.id,
+            lat=lat,
+            lon=lon,
+            geom=f"SRID=4326;POINT({lon} {lat})",
+            h3_cell=cell,
+            hazard_type=final_hazard,
+            urgency=urgency,
+            text=text,
+            lang=lang,
+            source=source,
+            embedding=embedding,
+            client_key=client_key,
+            created_at=created_at,
+            confidence_components={"media": engine.MEDIA_NEUTRAL},
+        )
     db.add(report)
     db.flush()
 
     if media_bytes:
-        path = media_mod.save_upload(media_bytes, media_filename)
-        forensics = media_mod.run_forensics(db, path, lat, lon, created_at)
-        db.add(
-            MediaAsset(
-                report_id=report.id,
-                path=str(path),
-                phash=forensics["phash"],
-                exif={**forensics["exif"], "gps_km": forensics["gps_km"],
-                      "time_offset_hours": forensics["time_offset_hours"],
-                      "reused": forensics["reused"]},
-            )
-        )
-        report.confidence_components = {
-            "media": engine.media_score(
-                has_media=True,
-                phash_reused=forensics["reused"],
-                exif_gps_km=forensics["gps_km"],
-                exif_time_offset_hours=forensics["time_offset_hours"],
-            ),
-            "media_forensics": {
-                "reused": forensics["reused"],
-                "gps_km": forensics["gps_km"],
-                "time_offset_hours": forensics["time_offset_hours"],
-            },
-        }
+        _attach_media(db, report, media_bytes, media_filename, lat, lon, created_at)
+
+    if bus_mode:
+        db.commit()
+        from app.modules.ingest import bus  # lazy: only bus mode needs a Kafka client
+
+        bus.ensure_topics()
+        bus.produce(bus.TOPIC_RAW, str(report.id))
+        return report
 
     assign_incident(db, report)
-    append_audit(
-        db,
-        event_type="report.created",
-        subject_type="report",
-        subject_id=str(report.id),
-        payload={
-            "source": source,
-            "hazard_type": final_hazard,
-            "h3_cell": cell,
-            "lang": lang,
-            "nlp_mode": classification.mode,
-            "incident_id": str(report.incident_id),
-        },
-    )
+    audit_report_created(db, report, classification.mode)
     rescore_report(db, report)
     db.commit()
     return report

@@ -46,6 +46,13 @@ services:
       TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
       TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
       VALHALLA_URL: ${VALHALLA_URL:-http://valhalla:8002}
+      # Architecture split (phase 3, milestone 8). Default "inline" is every
+      # prior milestone's behavior, unchanged. Setting PIPELINE_MODE=bus here
+      # AND bringing up the "split" profile (redpanda + the three consumer
+      # services below) switches create_report() to gateway-only — see
+      # modules/ingest/bus.py.
+      PIPELINE_MODE: ${PIPELINE_MODE:-inline}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-redpanda:9092}
     ports:
       - "8000:8000"
     volumes:
@@ -104,6 +111,85 @@ services:
       emqx:
         condition: service_healthy
     command: python -m app.modules.iot.bridge
+
+  # Architecture split (phase 3, milestone 8). Real Redpanda (Kafka-API
+  # compatible, single-node KRaft mode — no Zookeeper), not a stub, gated
+  # behind an opt-in profile so the default `docker compose up -d` stays
+  # exactly what every prior milestone already verified against. Bring this
+  # profile up alongside PIPELINE_MODE=bus (set on `backend` above) to run
+  # the split deployment: `docker compose --profile split up -d`.
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.18
+    profiles: ["split"]
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=1G
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+
+  # Three independent deployments of the same backend image, one per pipeline
+  # stage (modules/ingest/consumers/) — the plan's own "module seams already
+  # match, the split is repackaging" framing. Each is stateless and freely
+  # restartable, same as the delivery worker and IoT bridge: the broker owns
+  # the queue, the database owns everything else.
+  nlp-consumer:
+    build: ./backend
+    profiles: ["split"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://oceanping:oceanping@db:5432/oceanping
+      PIPELINE_MODE: bus
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      NLP_MODE: ${NLP_MODE:-embedding}
+      NLP_MODEL_VERSION: ${NLP_MODEL_VERSION:-}
+    volumes:
+      - hfcache:/root/.cache/huggingface
+      - models:/srv/data/models
+    depends_on:
+      db:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    command: python -m app.modules.ingest.consumers.nlp
+
+  dedup-consumer:
+    build: ./backend
+    profiles: ["split"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://oceanping:oceanping@db:5432/oceanping
+      PIPELINE_MODE: bus
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+    depends_on:
+      db:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    command: python -m app.modules.ingest.consumers.dedup
+
+  scoring-consumer:
+    build: ./backend
+    profiles: ["split"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://oceanping:oceanping@db:5432/oceanping
+      PIPELINE_MODE: bus
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+    depends_on:
+      db:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    command: python -m app.modules.ingest.consumers.scoring
 
   worker:
     build: ./backend
