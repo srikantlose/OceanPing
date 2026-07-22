@@ -2,13 +2,14 @@
 
 **Status: 🟡 in progress.** Milestones 1 (inundation model), 2 (auto-SITREPs), 3
 (forecasting + propagation pre-alerts), 4 (rumor tracker + alert drafting), 5
-(mobile app with an offline-first queue), and 7 (recovery module — damage
-assessment, mutual-aid board, missing-person registry) built; milestone 6's
-LoRaWAN IoT pilot built & live-verified (CoastSnap half deferred); milestone 8's
-event-bus split (Redpanda gateway + nlp/dedup/scoring consumers) built and
-live-verified, scoped to the split itself — Keycloak/MinIO/OpenSearch/k3s
-deferred, see its "as built" section for why — see their "as built" sections
-below. Prereqs: phases 1–2 (alerts, delivery, satellite, routing), both done.
+(mobile app with an offline-first queue, plus its mesh-relay spike), and 7
+(recovery module — damage assessment, mutual-aid board, missing-person registry)
+built; milestone 6's LoRaWAN IoT pilot built & live-verified (CoastSnap half
+deferred); milestone 8's event-bus split (Redpanda gateway + nlp/dedup/scoring
+consumers) built and live-verified, scoped to the split itself —
+Keycloak/MinIO/OpenSearch/k3s deferred, see its "as built" section for why —
+see their "as built" sections below. Prereqs: phases 1–2 (alerts, delivery,
+satellite, routing), both done.
 **Independent items**: inundation model, auto-SITREPs, CoastSnap/IoT pilot, drill scale-up.
 
 ## Goals
@@ -584,19 +585,102 @@ data-prep step, not credentials.
   backtested-forecast lookup fell off the end of a 50-row page once forecasts
   accumulated, which is why `/analyst/forecasts` gained a `subject_id`
   filter — narrowing to one station is a real analyst need, not a test hack.
-- **Not built** (explicit gaps, not oversights): the mesh relay (BLE/Wi-Fi
-  Direct) remains the timeboxed research spike this plan already scheduled
-  *after* the queue and marked additive — the client timestamps and
-  idempotency keys are exactly the primitives a hop-and-forward layer needs,
-  so the seam exists unused; no offline map packs (the report and check-in
-  flows don't need a map, so tile caching sits behind the parts that do); no
-  CRDT sync (nothing yet has concurrent writers on one record — submissions
-  are append-only from a single device); no photo attachment through the
-  queue (durably queueing binary payloads is a different storage problem than
-  queueing form fields); and the UI itself was never rendered on a device or
-  emulator in this environment — Metro on a Windows path containing a space
-  is a known breaker, so the screens are verified by a clean typecheck rather
-  than by running them.
+- **Not built** (explicit gaps, not oversights): no offline map packs (the
+  report and check-in flows don't need a map, so tile caching sits behind the
+  parts that do); no CRDT sync (nothing yet has concurrent writers on one
+  record — submissions are append-only from a single device); no photo
+  attachment through the queue (durably queueing binary payloads is a
+  different storage problem than queueing form fields); and the UI itself was
+  never rendered on a device or emulator in this environment — Metro on a
+  Windows path containing a space is a known breaker, so the screens are
+  verified by a clean typecheck rather than by running them. The mesh relay
+  (BLE/Wi-Fi Direct), the one item this plan explicitly scheduled *after* the
+  queue as a timeboxed research spike, is now built to that same scope — see
+  below.
+
+### Milestone 5 follow-on — as built (mesh-relay spike)
+
+The plan's own risk note called this "research-grade: timebox a spike; ship
+offline queue first (mesh is additive)" — so the scope here is deliberately
+just the protocol, not a shipped feature. What's built is real and
+live-verified against the running backend; what's out of scope is named
+explicitly rather than quietly missing.
+
+- **The seam the plan predicted was there, was there.** "CRDT sync and
+  BLE/Wi-Fi Direct mesh relay land (encrypted report bundles, hop metadata
+  honored by ingest timestamps — `create_report(created_at=…)` already
+  accepts client timestamps)" — this needed **zero backend changes**. A
+  relayed report reaches the server through the exact same `POST /reports`
+  every direct submission uses, carrying the *origin* device's
+  `client_id`/`client_key`/`observed_at` untouched. Reporter identity
+  (`ingest/service.py::_hash_identity`, keyed on `source:external_id`),
+  idempotency (`find_by_client_key`), and the observation-time clamp
+  (`clamp_observed_at`) all already do the right thing without knowing a
+  report took a hop to get there.
+- **New module `mobile/src/lib/mesh.ts`** — pure protocol logic, no BLE or
+  Wi-Fi Direct import, same "runs in plain Node and is testable" discipline
+  as `queue.ts`/`sync.ts`. `packBundle` strips a queue item down to exactly
+  `{kind, clientKey, observedAt, payload}` (no local ids, attempt counts, or
+  status — a receiving device inherits none of the sender's bookkeeping);
+  `sealBundle`/`openBundle` wrap `tweetnacl`'s `nacl.box` (X25519 +
+  XSalsa20-Poly1305) so a bundle is encrypted for a specific recipient's
+  public key, not just base64'd. This is transport security for the radio
+  hop, not access control against the relay itself — the relay is a fellow
+  human who agreed to carry someone else's reports and will decrypt them to
+  do it, the same trust as handing someone a sealed note to run to the next
+  village. What it stops is a *different* nearby device passively
+  harvesting report contents off the air without ever being asked to relay
+  anything.
+- **The real radio link is deliberately not built.** Actually discovering
+  and talking to a nearby phone over BLE or Wi-Fi Direct needs a native
+  module this environment can't build or verify — the same Metro-on-a-
+  Windows-path-with-a-space constraint already documented for the rest of
+  the mobile UI. `MeshTransport` (one method, `send(envelope)`) is the
+  injected seam a real implementation would fill, exactly like
+  `QueueStorage` and `fetch` are already injected with one real
+  implementation each (SQLite, the platform `fetch`) and a fake for tests —
+  here only the fake exists, by design.
+- **`QueueItem` gained two optional fields** (`relayedFrom`, `relayHop`) and
+  `QueueStatus` gained a fourth value, `"relayed"` — distinct from `"sent"`
+  because a device that hands its reports to a relay knows the bytes left
+  the phone, not that they reached the server. `SubmissionQueue` gained
+  three methods: `markRelayed` (moves due items to `"relayed"` with a
+  2-hour ack deadline instead of `"sent"`), `reclaimStaleRelays` (falls
+  handed-off items back to `"pending"` once that deadline passes without
+  counting against `MAX_ATTEMPTS` — a relay's silence must never lose a
+  report permanently, it just isn't a rejected delivery attempt either),
+  and `enqueueRelayed` (the receiving device's insert, preserving the
+  origin's `clientKey`/`observedAt` and refusing to merge the same
+  `clientKey` twice — the guard against being handed the same bundle
+  again before hearing back). `sync.ts::formBody` changed by exactly one
+  line: `client_id` is `item.relayedFrom ?? clientId` — the entire
+  integration point connecting a merged item back into the ordinary sync
+  path.
+- **Hop count is a chain-length bound only, never a trust input**
+  (`MAX_HOPS = 4`, enforced by dropping an over-cap bundle whole in
+  `receiveBundle`) — the same "report volume never escalates anything on
+  its own" discipline the scoring engine already enforces for citizen
+  reports generally applies here: a long relay chain proves nothing about a
+  report's truth, it just needs a ceiling so two devices can't loop a bundle
+  back and forth forever.
+- **Live-verified against the real backend, not mocks** —
+  `mobile/tests/live.integration.ts` now also proves the one property only
+  a real server can establish: that a relayed report lands in the *origin*
+  device's rate-limit bucket, not a fresh one for whoever happened to have
+  signal. Device A directly exhausted its own 5-per-10-minute quota (5/5
+  accepted, a 6th rejected with 429 as a sanity check); device B, never
+  used before, still had its full independent quota (a direct submission
+  from B succeeded). Device A then queued one more report and handed it to
+  device B over a simulated relay (`handOff` → real `nacl.box` encryption →
+  `receiveBundle`); device B's own sync then forwarded it to the real
+  backend under **device A's** identity, and it came back `429` — the
+  already-exhausted bucket, not device B's fresh one. A further direct
+  submission from device B immediately afterward still succeeded, proving
+  relaying on someone else's behalf doesn't cost the relay its own quota
+  either. 44 mobile tests passing (up from 29: +5 in `queue.test.ts` for
+  the new status/methods, +10 new in `mesh.test.ts` for pack/seal/open
+  round-tripping, tamper rejection, the hop cap, double-merge idempotency,
+  and the end-to-end two-device hand-off), with a clean `tsc --noEmit`.
 
 ## Milestone 6 — as built (IoT pilot; CoastSnap deferred)
 
@@ -948,8 +1032,9 @@ before writing any code, not a silent cut discovered partway through.
   Kubernetes cluster). None of the four change whether the event-bus split
   itself proves out under load, which is what the milestone's exit criterion
   actually asks for; each is a real, independent infra swap that could be
-  picked up on its own later, same as CoastSnap and the mesh-relay spike are
-  independent pickups from milestones 5–6.
+  picked up on its own later, same as CoastSnap is an independent pickup
+  from milestone 6 (the mesh-relay spike from milestone 5 is now built —
+  see above).
 
 ## Milestones
 
@@ -957,7 +1042,7 @@ before writing any code, not a silent cut discovered partway through.
 2. Auto-SITREPs (independent, high agency value) — ✅ built, see above
 3. Forecasting + propagation pre-alerts — ✅ built, see above
 4. Rumor tracker + alert drafting — ✅ built, see above
-5. Mobile app with offline queue (mesh spike separate) — ✅ built, see above
+5. Mobile app with offline queue + mesh-relay spike — ✅ built, see above
 6. CoastSnap + IoT pilot in one district — 🟡 IoT pilot built & live-verified; CoastSnap deferred (see above)
 7. Recovery module — ✅ built, see above
 8. Service split + 50× drill exit test — ✅ built (event-bus split scope), see above
@@ -989,6 +1074,15 @@ before writing any code, not a silent cut discovered partway through.
   and the same assertions in `scripts/drill.py`.
 - Mark Safe: a check-in reaches responders and never enters the hazard/scoring path.
   ✅ `test_safety_service.py`, plus a live check in `scripts/drill.py`.
+- Mesh relay: a report handed from one device to another over an encrypted
+  bundle reaches the server under the *origin* device's identity, not the
+  relay's — proven by rate-limit attribution, the one thing only a real
+  server can establish. ✅ `mesh.test.ts` (10 tests: seal/open round-trip,
+  wrong-recipient and tampered-ciphertext rejection, the hop cap, double-
+  merge idempotency, end-to-end two-device hand-off), plus a live check in
+  `mobile/tests/live.integration.ts` (a relayed report came back 429 under
+  device A's already-exhausted quota, not device B's fresh one; device B's
+  own quota was untouched by relaying on A's behalf).
 - IoT pilot: a reading published over real MQTT self-registers an `iot` station and drives
   the existing anomaly detector with no IoT-specific scoring. ✅ `test_iot_parser.py` +
   `test_iot_service.py` (23), plus a real-broker live check in `scripts/iot/iot_live_check.py`

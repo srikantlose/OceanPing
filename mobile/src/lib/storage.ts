@@ -46,6 +46,8 @@ interface Row {
   attempts: number;
   next_attempt_at: number;
   last_error: string | null;
+  relayed_from: string | null;
+  relay_hop: number | null;
 }
 
 const CREATE_TABLE = `
@@ -58,7 +60,9 @@ CREATE TABLE IF NOT EXISTS queue_items (
   status TEXT NOT NULL,
   attempts INTEGER NOT NULL DEFAULT 0,
   next_attempt_at INTEGER NOT NULL DEFAULT 0,
-  last_error TEXT
+  last_error TEXT,
+  relayed_from TEXT,
+  relay_hop INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_queue_status ON queue_items (status, next_attempt_at);
 `;
@@ -74,6 +78,8 @@ function toItem(row: Row): QueueItem {
     attempts: row.attempts,
     nextAttemptAt: row.next_attempt_at,
     lastError: row.last_error ?? undefined,
+    relayedFrom: row.relayed_from ?? undefined,
+    relayHop: row.relay_hop ?? undefined,
   };
 }
 
@@ -88,12 +94,14 @@ export class SqliteQueueStorage implements QueueStorage {
   async insert(item: QueueItem): Promise<void> {
     await this.db.runAsync(
       `INSERT INTO queue_items
-         (id, kind, client_key, observed_at, payload, status, attempts, next_attempt_at, last_error)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (id, kind, client_key, observed_at, payload, status, attempts, next_attempt_at, last_error,
+          relayed_from, relay_hop)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         item.id, item.kind, item.clientKey, item.observedAt,
         JSON.stringify(item.payload), item.status, item.attempts,
         item.nextAttemptAt, item.lastError ?? null,
+        item.relayedFrom ?? null, item.relayHop ?? null,
       ],
     );
   }

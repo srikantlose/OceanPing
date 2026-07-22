@@ -12,6 +12,7 @@
  * time it was observed, and that retrying a submission whose reply was lost
  * produces one report rather than two.
  */
+import { MeshEnvelope, generateKeyPair, handOff, openBundle, receiveBundle } from "../src/lib/mesh";
 import { SubmissionQueue } from "../src/lib/queue";
 import { MemoryQueueStorage } from "../src/lib/storage";
 import { syncOnce } from "../src/lib/sync";
@@ -160,6 +161,87 @@ async function main() {
   })).json();
   const leaked = newestReports.some((r: any) => (r.text ?? "").includes("stranded, water rising"));
   check("a check-in never becomes a hazard report", !leaked);
+
+  // --- 6. Mesh relay: attribution and rate-limiting survive a hand-off ----
+  // The property that only a real server can prove: a report relayed
+  // through another device's network connection must land in the
+  // *origin* device's reporter bucket, not a fresh one for whoever
+  // happened to have signal. A distinct cell isolates this from the
+  // per-cell rate limit and from the other checks above.
+  const MESH_CELL = { lat: 13.091, lon: 80.301 };
+  const deviceA = `mesh-live-A-${Date.now()}`;
+  const deviceB = `mesh-live-B-${Date.now()}`;
+
+  async function submitDirect(clientId: string, clientKey: string) {
+    const body = new URLSearchParams({
+      lat: MESH_CELL.lat.toFixed(6),
+      lon: MESH_CELL.lon.toFixed(6),
+      hazard_type: "high_waves",
+      client_id: clientId,
+      client_key: clientKey,
+    });
+    return fetch(`${API}/reports`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    });
+  }
+
+  let quota = 0;
+  for (let i = 0; i < 5; i++) {
+    const resp = await submitDirect(deviceA, `${deviceA}-direct-${i}`);
+    if (resp.ok) quota += 1;
+  }
+  check("direct submissions exhaust device A's own rate-limit quota", quota === 5, `${quota}/5 accepted`);
+
+  const overQuota = await submitDirect(deviceA, `${deviceA}-direct-over`);
+  check("a 6th direct submission from device A is rate-limited (sanity check)", overQuota.status === 429);
+
+  const bDirect = await submitDirect(deviceB, `${deviceB}-direct-0`);
+  check("device B's own quota is untouched by device A's activity so far", bDirect.ok, `HTTP ${bDirect.status}`);
+
+  // Device A queues one more report while offline and hands it to device B
+  // over a simulated radio hop (real BLE/Wi-Fi Direct is out of scope for
+  // this spike — see mesh.ts's module docstring — so the transport here is
+  // just an in-process function call standing in for the radio).
+  const alice = generateKeyPair();
+  const bob = generateKeyPair();
+  const meshQueueA = new SubmissionQueue({ storage: new MemoryQueueStorage() });
+  await meshQueueA.enqueue({
+    kind: "report",
+    observedAt: Date.now() - 30 * 60 * 1000,
+    payload: {
+      lat: MESH_CELL.lat.toFixed(6),
+      lon: MESH_CELL.lon.toFixed(6),
+      hazard_type: "high_waves",
+      text: "mesh relay live check: relayed while device A had no signal",
+    },
+  });
+
+  const meshQueueB = new SubmissionQueue({ storage: new MemoryQueueStorage() });
+  const transport = {
+    send: async (envelope: MeshEnvelope) => {
+      const bundle = openBundle(envelope, bob);
+      await receiveBundle(bundle, meshQueueB);
+    },
+  };
+  const handedOff = await handOff(meshQueueA, deviceA, alice, bob.publicKey, transport);
+  check("device A hands its queued report to device B over the simulated relay", handedOff === 1);
+  check("device A's own queue marks the item relayed, not sent",
+        (await meshQueueA.counts()).relayed === 1);
+
+  // Device B drains its own queue — which now includes A's relayed item —
+  // against the real backend using device B's own clientId. sync.ts's
+  // formBody must still send it under device A's identity.
+  const relaySync = await syncOnce({ apiBase: API, queue: meshQueueB, clientId: deviceB });
+  check("device B forwards the relayed item to the real backend", relaySync.attempted === 1);
+  check("the relayed report is rate-limited under device A's exhausted quota, not device B's fresh one",
+        relaySync.failed === 1 && relaySync.errors.some((e) => e.includes("429")),
+        relaySync.errors.join("; "));
+
+  const bAfterRelay = await submitDirect(deviceB, `${deviceB}-direct-1`);
+  check("device B's own quota is unaffected by relaying someone else's report",
+        bAfterRelay.ok, `HTTP ${bAfterRelay.status}`);
 
   console.log(failures === 0 ? "\n✓ Live offline-queue check passed." : `\n✗ ${failures} check(s) failed.`);
   process.exit(failures === 0 ? 0 : 1);

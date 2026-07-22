@@ -12,6 +12,9 @@ const STATUS_LABEL: Record<QueueItem["status"], string> = {
   pending: "waiting",
   sent: "sent",
   failed: "needs attention",
+  // Handed to a nearby device to relay (lib/mesh.ts) — not confirmed
+  // delivered yet, so still distinct from "sent".
+  relayed: "sent via nearby phone",
 };
 
 export function QueueScreen({ ctx, onChanged }: { ctx: AppContext; onChanged: () => void }) {

@@ -26,7 +26,7 @@
 
 export type QueueKind = "report" | "checkin";
 
-export type QueueStatus = "pending" | "sent" | "failed";
+export type QueueStatus = "pending" | "sent" | "failed" | "relayed";
 
 export interface QueueItem {
   id: string;
@@ -42,6 +42,16 @@ export interface QueueItem {
   /** Epoch ms before which this item should not be retried (backoff). */
   nextAttemptAt: number;
   lastError?: string;
+  /** Mesh relay only (phase 3, milestone 5 follow-on — see lib/mesh.ts): the
+   *  device id of whoever this item's report actually belongs to, if it
+   *  arrived here by hand-off rather than being enqueued locally. When set,
+   *  sync.ts sends the report under *this* identity, not the relaying
+   *  device's own — a relay is a network pipe, not a co-author. */
+  relayedFrom?: string;
+  /** How many hand-offs this item has already been through. Purely a
+   *  chain-length bound (see MAX_HOPS in mesh.ts) — never an input to trust
+   *  or scoring. */
+  relayHop?: number;
 }
 
 export interface NewQueueItem {
@@ -75,6 +85,13 @@ export const MAX_ATTEMPTS = 8;
 
 const BACKOFF_BASE_MS = 5_000;
 const BACKOFF_CAP_MS = 15 * 60 * 1000;
+
+/** How long a handed-off item waits for its relay to actually deliver it
+ *  before the origin device gives up trusting the hand-off and falls back
+ *  to trying directly again. Long enough that a relay still without signal
+ *  gets a real chance; short enough that a report doesn't sit silently
+ *  stuck for a day when trying again directly might have found a tower. */
+export const RELAY_ACK_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 
 /** Exponential backoff, capped. Deterministic (no jitter): a single phone
  *  isn't a thundering herd, and predictable timing is worth more here for
@@ -179,6 +196,62 @@ export class SubmissionQueue {
     return failed.length;
   }
 
+  /** Mark an item handed off to a nearby relay (mesh.ts::handOff). Not
+   *  "sent" — the device only knows the bytes left the phone, not that they
+   *  reached the server, so it's a distinct state that expects to hear
+   *  nothing further unless the relay never delivers. */
+  async markRelayed(item: QueueItem): Promise<QueueItem> {
+    const updated: QueueItem = { ...item, status: "relayed", nextAttemptAt: this.now() + RELAY_ACK_TIMEOUT_MS };
+    await this.storage.update(updated);
+    return updated;
+  }
+
+  /** Items handed to a relay that never confirmed within the timeout fall
+   *  back to pending so the device goes back to trying directly — a relay's
+   *  silence must never lose a report permanently. Not counted as a failed
+   *  attempt (attempts is untouched): the server never saw and rejected
+   *  anything, the hand-off itself just didn't pan out. */
+  async reclaimStaleRelays(): Promise<number> {
+    const now = this.now();
+    const stale = (await this.storage.all()).filter((i) => i.status === "relayed" && i.nextAttemptAt <= now);
+    for (const item of stale) {
+      await this.storage.update({ ...item, status: "pending", nextAttemptAt: 0 });
+    }
+    return stale.length;
+  }
+
+  /** The receiving side of a hand-off (mesh.ts::receiveBundle): insert an
+   *  item forwarded by another device, preserving its clientKey and
+   *  observedAt so identity, idempotency, and the observation-time clamp
+   *  all survive the hop untouched. Returns null without inserting if this
+   *  clientKey is already present — guards against being handed the same
+   *  bundle twice (a relay that re-broadcasts before hearing back). */
+  async enqueueRelayed(input: {
+    kind: QueueKind;
+    clientKey: string;
+    observedAt: number;
+    payload: Record<string, string>;
+    relayedFrom: string;
+    relayHop: number;
+  }): Promise<QueueItem | null> {
+    const existing = await this.storage.all();
+    if (existing.some((i) => i.clientKey === input.clientKey)) return null;
+    const item: QueueItem = {
+      id: this.newId(),
+      kind: input.kind,
+      clientKey: input.clientKey,
+      observedAt: input.observedAt,
+      payload: input.payload,
+      status: "pending",
+      attempts: 0,
+      nextAttemptAt: 0,
+      relayedFrom: input.relayedFrom,
+      relayHop: input.relayHop,
+    };
+    await this.storage.insert(item);
+    return item;
+  }
+
   /** Drop already-sent items. Kept explicit rather than automatic on send so
    *  the UI can show "3 reports synced" before they disappear. */
   async purgeSent(): Promise<number> {
@@ -195,6 +268,7 @@ export class SubmissionQueue {
       pending: all.filter((i) => i.status === "pending").length,
       sent: all.filter((i) => i.status === "sent").length,
       failed: all.filter((i) => i.status === "failed").length,
+      relayed: all.filter((i) => i.status === "relayed").length,
     };
   }
 }

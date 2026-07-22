@@ -44,13 +44,22 @@ export function isRetryable(status: number | null): boolean {
 
 /** Build the multipart/form-encoded body the ingest endpoints expect. The
  *  queue stores payload fields as strings precisely so this stays a
- *  mechanical translation with nothing to get wrong at send time. */
+ *  mechanical translation with nothing to get wrong at send time.
+ *
+ *  An item that arrived via mesh relay (lib/mesh.ts) carries `relayedFrom`
+ *  — the *origin* device's id — and that, not the relaying device's own
+ *  clientId, is what goes out as client_id. The backend hashes source+
+ *  external_id into a reporter identity (ingest/service.py::_hash_identity)
+ *  with no idea a report took a hop to arrive, so this one line is the
+ *  entire reason relayed reports still attribute, rate-limit, and dedupe
+ *  against the right person instead of the phone that happened to have
+ *  signal. */
 export function formBody(item: QueueItem, clientId: string): URLSearchParams {
   const body = new URLSearchParams();
   for (const [k, v] of Object.entries(item.payload)) {
     body.set(k, v);
   }
-  body.set("client_id", clientId);
+  body.set("client_id", item.relayedFrom ?? clientId);
   body.set("client_key", item.clientKey);
   body.set("observed_at", new Date(item.observedAt).toISOString());
   return body;

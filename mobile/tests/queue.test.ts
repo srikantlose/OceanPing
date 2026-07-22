@@ -146,7 +146,7 @@ describe("ordering and lifecycle", () => {
     await queue.enqueue(REPORT);
     await queue.markSent(a);
     await queue.markFailed(b, "HTTP 422", false);
-    expect(await queue.counts()).toEqual({ pending: 1, sent: 1, failed: 1 });
+    expect(await queue.counts()).toEqual({ pending: 1, sent: 1, failed: 1, relayed: 0 });
   });
 
   it("lists everything still on the device, newest observation first", async () => {
@@ -166,5 +166,72 @@ describe("ordering and lifecycle", () => {
     // A fresh queue object over the same storage is what a relaunch looks like.
     const second = new SubmissionQueue({ storage, now: () => T0 });
     expect(await second.pending()).toHaveLength(1);
+  });
+});
+
+describe("mesh relay support", () => {
+  it("marks a handed-off item relayed instead of sent, with a future retry deadline", async () => {
+    let clock = T0;
+    const { queue } = makeQueue(() => clock);
+    const item = await queue.enqueue(REPORT);
+    const relayed = await queue.markRelayed(item);
+    expect(relayed.status).toBe("relayed");
+    expect(relayed.nextAttemptAt).toBeGreaterThan(clock);
+    expect(await queue.due()).toHaveLength(0);
+    expect(await queue.pending()).toHaveLength(0);
+  });
+
+  it("falls back to pending once the relay ack deadline passes", async () => {
+    let clock = T0;
+    const { queue } = makeQueue(() => clock);
+    const item = await queue.enqueue(REPORT);
+    const relayed = await queue.markRelayed(item);
+    expect(await queue.reclaimStaleRelays()).toBe(0);
+    clock = relayed.nextAttemptAt + 1;
+    expect(await queue.reclaimStaleRelays()).toBe(1);
+    expect(await queue.counts()).toMatchObject({ pending: 1, relayed: 0 });
+    expect(await queue.due()).toHaveLength(1);
+  });
+
+  it("does not reclaim a relay that still has time left", async () => {
+    const { queue } = makeQueue();
+    const item = await queue.enqueue(REPORT);
+    await queue.markRelayed(item);
+    expect(await queue.reclaimStaleRelays()).toBe(0);
+    expect(await queue.counts()).toMatchObject({ relayed: 1, pending: 0 });
+  });
+
+  it("inserts a forwarded item under the origin device's identity, preserving its clientKey and observedAt", async () => {
+    const { queue } = makeQueue();
+    const merged = await queue.enqueueRelayed({
+      kind: "report",
+      clientKey: "origin-key-1",
+      observedAt: T0 - 3_600_000,
+      payload: REPORT.payload,
+      relayedFrom: "device-A",
+      relayHop: 0,
+    });
+    expect(merged).not.toBeNull();
+    expect(merged!.clientKey).toBe("origin-key-1");
+    expect(merged!.observedAt).toBe(T0 - 3_600_000);
+    expect(merged!.relayedFrom).toBe("device-A");
+    expect(merged!.status).toBe("pending");
+    expect(await queue.due()).toHaveLength(1);
+  });
+
+  it("refuses to merge the same relayed item twice", async () => {
+    const { queue } = makeQueue();
+    const input = {
+      kind: "report" as const,
+      clientKey: "origin-key-2",
+      observedAt: T0,
+      payload: REPORT.payload,
+      relayedFrom: "device-A",
+      relayHop: 0,
+    };
+    await queue.enqueueRelayed(input);
+    const second = await queue.enqueueRelayed(input);
+    expect(second).toBeNull();
+    expect(await queue.all()).toHaveLength(1);
   });
 });
