@@ -1,10 +1,10 @@
 # Phase 4 — Scale, Openness & Sustainability (months 11+, gap plan)
 
-**Status: 🟡 milestone 1 (CAP + official interop) built.** Prereqs: phase 3 (service
-split, mobile app, verified-event corpus) — all met. This phase is thematic rather than
-strictly sequential — items are largely independent tracks; pick by pilot/partner pull.
-The remaining six milestones (federated learning, AR, hazard-registry refactor, open
-data, multi-state tenanting, insurance API) are all still planned.
+**Status: 🟡 milestones 1–2 built** (CAP + official interop; hazard registry refactor).
+Prereqs: phase 3 (service split, mobile app, verified-event corpus) — all met. This
+phase is thematic rather than strictly sequential — items are largely independent
+tracks; pick by pilot/partner pull. The remaining five milestones (federated learning,
+AR, open data, multi-state tenanting, insurance API) are all still planned.
 
 ## Goals
 
@@ -209,10 +209,104 @@ table is public yet. `cap_sender`/`cap_sender_name` are pilot placeholders, swap
 via env the day a partnership lands — exactly the plan's own point in building this
 before one exists.
 
+## Milestone 2 — as built (hazard registry refactor)
+
+Before this milestone, "what does hazard X mean" was answered by nine hand-maintained
+Python dicts scattered across five modules — `scoring/engine.py::HAZARD_VARIABLES`,
+`satellite/providers.py::HAZARD_RECIPES`, `alerts/engine.py`'s label tables,
+`ingest/report_conversation.py`'s menu/speech tables, `alerts/cap_ingest.py::
+EVENT_HAZARD_KEYWORDS`, and `chat/corpus.py`'s per-hazard FAQ entries — each keyed by
+the same nine hazard strings, each needing its own edit to add a hazard. Auditing all
+of them (to scope this milestone) turned up real drift already: the frontend's short
+"Erosion" legend label didn't match the alert engine's "Coastal erosion" for the same
+hazard, and `alerts/engine.py`'s docstring claimed to reuse `report_conversation.py`'s
+speech labels verbatim but actually carried its own, slightly different copy for two
+hazards (`algal_bloom`, `other`). Neither was a bug exactly — just the natural result
+of nine independent dicts with no single source of truth.
+
+**`modules/hazards/registry.py` + `modules/hazards/definitions/*.yaml`.** One YAML
+file per hazard now holds everything: `key`, `order` (menu/legend position — "other"
+sits at `999` so any real hazard added with a normal order value always lists before
+it), `menu_label`/`speech_label` per language (falls back to English if a language is
+missing), `alert_label_en` (the alert-body copy, which this app has never translated
+separately from speech copy — see below), `instrument_variables`, `satellite_recipe`,
+`cap_event_keywords`, and an optional `faq` list. `load_registry(directory)` is a pure
+function — reads every `*.yaml` in a directory, validates required fields, returns a
+`dict[str, HazardDef]` ordered by `order` — so tests can point it at a fixture
+directory without touching the real, shipped one. The module-level `HAZARDS`/
+`HAZARD_TYPES` are just `load_registry(DEFINITIONS_DIR)` computed once at import, the
+same "config loaded once at process start" posture every other static table in this
+app already has (`WEIGHTS`, `TIER_RANK`, and so on) — adding a hazard means adding a
+YAML file and restarting the process, not a hot-reload feature, which was never asked
+for and would be a different, riskier kind of change.
+
+**Every consumer now derives from the registry instead of hand-maintaining a copy:**
+`models.py::HAZARD_TYPES`, `scoring/engine.py::HAZARD_VARIABLES`,
+`satellite/providers.py::HAZARD_RECIPES`, `alerts/engine.py`'s label tables,
+`ingest/report_conversation.py`'s menu/speech tables,
+`alerts/cap_ingest.py::EVENT_HAZARD_KEYWORDS`, and `chat/corpus.py`'s per-hazard FAQ
+entries are each now a one-line call into `registry.py` (`instrument_variables_table()`,
+`satellite_recipes_table()`, `alert_labels_by_lang()`, `cap_event_keywords_table()`,
+`faq_entries()`, and so on) instead of a hardcoded dict — every existing name
+(`HAZARD_VARIABLES`, `HAZARD_RECIPES`, `HAZARD_LABELS_BY_LANG`, ...) is preserved so
+none of their ~15 call sites across the app needed to change. `chat/corpus.py` keeps a
+small `GENERAL_FAQ` list of its own for the entries that aren't about any one hazard
+(alert tiers, report statuses, trust score, helpline); its "what hazard types does
+OceanPing track" overview entry now lists the registry's own hazard names at seed time
+instead of a hand-typed count, so it can't go stale the next time a hazard is added.
+
+The nine shipped hazard files are a faithful port of the pre-refactor content — no
+label, keyword, or corroboration rule changed, including the two curated cases where
+`alerts/engine.py`'s English copy genuinely differed from `report_conversation.py`'s
+speech copy (`algal_bloom`, `other`) — both are preserved via `alert_label_en` rather
+than silently merged, since that's a real content decision this refactor's job wasn't
+to relitigate.
+
+**Verified in two layers**, matching this project's established unit-vs-live split:
+- `tests/test_hazard_registry.py` — parity tests assert every derived table
+  (instrument variables, satellite recipes, all nine hazards' labels in all three
+  languages, CAP keyword mapping, FAQ ids) exactly matches the pre-refactor hardcoded
+  content; loader tests cover duplicate-key rejection and a missing required field;
+  and a minimal-hazard test (only `key`, `order`, one English `menu_label`) proves
+  every optional table — translations, satellite recipe, CAP keywords, FAQ — degrades
+  to an empty/English-fallback value rather than raising, exactly the bar the plan
+  itself set for "adding a hazard is a config PR."
+- `scripts/hazard_registry_live_check.py` — proves the same claim against the real
+  running stack, not just the derivation functions: a throwaway
+  `definitions/_live_check_toy_hazard.yaml` (key `king_tide`, nothing but `key`,
+  `order`, and an English `menu_label` — no translations, no satellite recipe, no CAP
+  keywords, no FAQ) was added, the backend image rebuilt and restarted, and the live
+  check confirmed — with zero code changes anywhere outside that one file — that
+  `GET /hazard-types` lists it, `POST /reports` accepts it (proving hazard-type
+  validation reads the registry, not a second hardcoded list in the ingest router),
+  it survives a real scoring pass and gets assigned to an incident, an analyst can
+  issue a warning for it, and the resulting CAP document renders its fallback label
+  without error. The toy file was then deleted and the image rebuilt again to restore
+  the shipped nine-hazard state — confirmed via `GET /hazard-types` and a full rerun
+  of the backend test suite (519 passed both before and after).
+
+Backend suite: 519 → 519 tests, same total both before and after the live-check
+excursion (the toy hazard was never part of the committed test fixtures); 519 is up
+from milestone 1's 503 (16 new: 14 in `test_hazard_registry.py`, 2 added to
+`test_chat_corpus.py` for the `GENERAL_FAQ`/registry-FAQ split), plus one new
+dependency (`PyYAML`), all passing, plus a clean `docker compose build` for `backend`.
+No migration needed (no schema change) and no frontend change (see below).
+
+**Not built, deliberately:** `frontend/lib/palette.ts`'s hazard color/label maps are
+untouched — the plan's own text names "scoring, satellite, alerts, chat" as this
+registry's consumers, not the frontend, and `GET /hazard-types` already existed
+pre-refactor returning a bare string list with no frontend caller to begin with.
+Wiring the frontend to fetch hazard metadata (so a new hazard gets a real map color
+and dashboard label with zero frontend edits too) is a reasonable, clearly-scoped
+follow-up, not folded in here. `nlp/prototypes.py`'s classifier training phrases/
+keywords are also untouched — those are ML training data, not behavioral config, so a
+genuinely new hazard still needs its own classifier examples the same way it always
+has; that's inherent to supervised classification, not a registry limitation.
+
 ## Milestones
 
 1. CAP generator + inbound CAP corroboration — ✅ built, see above
-2. Hazard registry refactor (config-only new hazards)
+2. Hazard registry refactor (config-only new hazards) — ✅ built, see below
 3. Open-data pipeline with DP + retention jobs
 4. Multi-state tenanting + per-district metrics
 5. Vulnerability-aware alerting (with DPO review)
@@ -229,4 +323,7 @@ before one exists.
 - DP: re-identification test on released aggregates (no cell below k threshold).
 - Tenanting: cross-state analyst cannot read another state's exact coordinates (authz test).
 - Hazard registry: add a toy hazard purely via config → report→score→alert path works in
-  drill with zero code diff outside the registry.
+  drill with zero code diff outside the registry — ✅ done (`tests/test_hazard_registry.py`
+  proves every derived table degrades gracefully for a minimal hazard; `scripts/
+  hazard_registry_live_check.py` proves the same against the real running stack with an
+  actual added-then-removed YAML file and a rebuild).

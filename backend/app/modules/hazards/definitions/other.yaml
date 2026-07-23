@@ -1,0 +1,16 @@
+# The catch-all bucket — deliberately last (see `order`) so a new specific
+# hazard registered with any lower order value always lists before it.
+key: other
+order: 999
+
+menu_label:
+  en: "❓ Other"
+  ta: "❓ மற்றவை"
+  te: "❓ ఇతర"
+speech_label:
+  en: "another hazard"
+  ta: "வேறு ஆபத்து"
+  te: "వేరే ప్రమాదం"
+alert_label_en: "Coastal hazard"
+
+instrument_variables: [water_level, wave_height, air_pressure]

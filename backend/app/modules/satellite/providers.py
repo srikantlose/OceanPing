@@ -17,18 +17,16 @@ from datetime import datetime, timezone
 from typing import Protocol
 
 from app.core.config import get_settings
+from app.modules.hazards.registry import satellite_recipes_table
 
 log = logging.getLogger(__name__)
 
 # Which hazard types have a satellite recipe at all, mirroring
 # scoring/engine.py::HAZARD_VARIABLES — hazards with no recipe here never
 # get a satellite component above 0, and the poll job skips them outright.
-HAZARD_RECIPES: dict[str, str] = {
-    "oil_spill": "sentinel1_sar_dark_slick",
-    "algal_bloom": "sentinel2_ndci_anomaly",
-    "coastal_flooding": "sentinel1_water_extent",
-    "storm_surge": "sentinel1_water_extent",
-}
+# Sourced from the hazard registry (phase 4, milestone 2) — a new hazard's
+# recipe (or lack of one) is a config file, not a code edit here.
+HAZARD_RECIPES: dict[str, str] = satellite_recipes_table()
 
 
 @dataclass

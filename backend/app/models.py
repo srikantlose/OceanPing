@@ -20,20 +20,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.config import get_settings
 from app.core.db import Base
+from app.modules.hazards.registry import HAZARD_TYPES
 
 EMBEDDING_DIM = get_settings().embedding_dim
-
-HAZARD_TYPES = [
-    "coastal_flooding",
-    "storm_surge",
-    "high_waves",
-    "tsunami",
-    "rip_current",
-    "oil_spill",
-    "algal_bloom",
-    "erosion",
-    "other",
-]
 
 REPORT_STATUSES = ["unverified", "corroborated", "verified", "rejected"]
 

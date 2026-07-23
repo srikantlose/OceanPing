@@ -1,0 +1,27 @@
+key: algal_bloom
+order: 70
+
+menu_label:
+  en: "🟢 Algal bloom / fish kill"
+  ta: "🟢 பாசி பெருக்கம் / மீன் இறப்பு"
+  te: "🟢 ఆల్గే వ్యాప్తి / చేపల మరణం"
+speech_label:
+  en: "algal bloom or fish kill"
+  ta: "பாசி பெருக்கம் அல்லது மீன் இறப்பு"
+  te: "ఆల్గే వ్యాప్తి లేదా చేపల మరణం"
+alert_label_en: "Algal bloom"
+
+# Same as oil_spill — chlorophyll/NDCI anomaly is the corroboration path, not instruments.
+instrument_variables: []
+satellite_recipe: sentinel2_ndci_anomaly
+cap_event_keywords: [red tide, algal bloom]
+
+faq:
+  - id: faq-algal-bloom
+    title: "What is a harmful algal bloom and why does water color change?"
+    content: >
+      A harmful algal bloom is a rapid increase in algae that can discolor water
+      (often green, red, or brown) and is sometimes associated with fish kills or
+      unusual smells; some blooms produce toxins. If you notice discolored water,
+      dead fish, or unusual odors along the coast, avoid swimming in or eating
+      seafood from the affected area and report it.

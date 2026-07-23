@@ -13,27 +13,17 @@ from datetime import datetime, timezone
 
 from xml.etree import ElementTree as ET
 
+from app.modules.hazards.registry import cap_event_keywords_table
+
 CAP_NS = "urn:oasis:names:tc:emergency:cap:1.2"
 
 # Best-effort keyword match against a CAP <event> string onto the hazard
-# vocabulary this app models (models.py::HAZARD_TYPES) — deliberately not a
-# lookup against a real agency's event-code table, since no such table exists
-# for any Indian issuing authority yet. An event that matches nothing is not
-# stored at all (see cap_service.py) rather than guessed at — an unmapped
-# advisory has nothing to corroborate.
-EVENT_HAZARD_KEYWORDS: list[tuple[str, str]] = [
-    ("tsunami", "tsunami"),
-    ("storm surge", "storm_surge"),
-    ("storm tide", "storm_surge"),
-    ("high wave", "high_waves"),
-    ("high surf", "high_waves"),
-    ("rip current", "rip_current"),
-    ("coastal flood", "coastal_flooding"),
-    ("oil spill", "oil_spill"),
-    ("red tide", "algal_bloom"),
-    ("algal bloom", "algal_bloom"),
-    ("erosion", "erosion"),
-]
+# vocabulary this app models (modules/hazards/ — phase 4, milestone 2) —
+# deliberately not a lookup against a real agency's event-code table, since
+# no such table exists for any Indian issuing authority yet. An event that
+# matches nothing is not stored at all (see cap_service.py) rather than
+# guessed at — an unmapped advisory has nothing to corroborate.
+EVENT_HAZARD_KEYWORDS: list[tuple[str, str]] = cap_event_keywords_table()
 
 
 def map_event_to_hazard(event_text: str) -> str | None:

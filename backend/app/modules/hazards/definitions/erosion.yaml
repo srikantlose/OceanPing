@@ -1,0 +1,24 @@
+key: erosion
+order: 80
+
+menu_label:
+  en: "🏖️ Coastal erosion"
+  ta: "🏖️ கடற்கரை அரிப்பு"
+  te: "🏖️ తీర కోత"
+speech_label:
+  en: "coastal erosion"
+  ta: "கடற்கரை அரிப்பு"
+  te: "తీర కోత"
+alert_label_en: "Coastal erosion"
+
+instrument_variables: [wave_height, water_level]
+cap_event_keywords: [erosion]
+
+faq:
+  - id: faq-erosion
+    title: "What is coastal erosion?"
+    content: >
+      Coastal erosion is the gradual (or sometimes sudden, during storms) loss of
+      land or sand along a shoreline as waves and currents wear it away.
+      Structures built close to an eroding shoreline can become unstable over
+      time. Reporting visible erosion helps track changing coastlines.

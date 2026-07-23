@@ -1,0 +1,26 @@
+key: tsunami
+order: 40
+
+menu_label:
+  en: "⚠️ Tsunami signs"
+  ta: "⚠️ சுனாமி அறிகுறிகள்"
+  te: "⚠️ సునామీ సూచనలు"
+speech_label:
+  en: "tsunami signs"
+  ta: "சுனாமி அறிகுறிகள்"
+  te: "సునామీ సూచనలు"
+alert_label_en: "Tsunami signs"
+
+instrument_variables: [water_level, wave_height]
+cap_event_keywords: [tsunami]
+
+faq:
+  - id: faq-tsunami-signs
+    title: "What are natural warning signs of a tsunami?"
+    content: >
+      Natural warning signs include: strong or long earthquake shaking near the
+      coast, the sea suddenly and unusually receding far from the shoreline and
+      exposing the sea floor, a loud roaring sound from the ocean, and unusual
+      rapid rises or falls in coastal water level. Coastal safety guidance is to
+      move to higher ground immediately if you observe these signs directly,
+      rather than waiting for an official alert.

@@ -23,6 +23,8 @@ from enum import Enum
 
 from app.core.redisclient import get_redis
 from app.models import HAZARD_TYPES
+from app.modules.hazards import registry as hazard_registry
+from app.modules.hazards.registry import SUPPORTED_LANGS
 
 log = logging.getLogger(__name__)
 
@@ -39,99 +41,25 @@ class ConvState(str, Enum):
 
 # Canonical hazard menu, in `HAZARD_TYPES` order so every channel numbers/lists
 # hazards identically. "other" is deliberately last, matching HAZARD_TYPES.
-HAZARD_LABELS = {
-    "coastal_flooding": "🌊 Coastal flooding",
-    "storm_surge": "🌀 Storm surge",
-    "high_waves": "🌊 High waves",
-    "tsunami": "⚠️ Tsunami signs",
-    "rip_current": "🏊 Rip current",
-    "oil_spill": "🛢️ Oil spill",
-    "algal_bloom": "🟢 Algal bloom / fish kill",
-    "erosion": "🏖️ Coastal erosion",
-    "other": "❓ Other",
-}
-
-# Plain-text equivalents for channels that can't render emoji sensibly
-# (IVR text-to-speech reads them aloud oddly or drops them).
-HAZARD_SPEECH_LABELS = {
-    "coastal_flooding": "coastal flooding",
-    "storm_surge": "storm surge",
-    "high_waves": "high waves",
-    "tsunami": "tsunami signs",
-    "rip_current": "rip current",
-    "oil_spill": "oil spill",
-    "algal_bloom": "algal bloom or fish kill",
-    "erosion": "coastal erosion",
-    "other": "another hazard",
-}
-
-assert set(HAZARD_LABELS) == set(HAZARD_TYPES) == set(HAZARD_SPEECH_LABELS)
-
+#
 # --- Localization (phase 2, milestone 5) ------------------------------------
 #
-# Tamil/Telugu strings below are a first pass for the pilot deployment — not
+# Tamil/Telugu strings are a first pass for the pilot deployment — not
 # reviewed by a native speaker. They use standard, widely-recognized
 # disaster-terminology vocabulary, but a review pass is recommended before
 # relying on them beyond the pilot, especially for the hazard names
 # themselves (getting "tsunami" or "storm surge" wrong is exactly the kind of
 # mistake that matters here). English is always the safe fallback for an
-# unrecognized or unconfigured language.
-SUPPORTED_LANGS = ("en", "ta", "te")
+# unrecognized, unconfigured, or not-yet-translated hazard/language.
+#
+# All hazard label/speech content now lives in the hazard registry (phase 4,
+# milestone 2; see modules/hazards/) rather than as dicts here — this module
+# just asks the registry for each language's table.
+HAZARD_LABELS = hazard_registry.menu_labels_by_lang("en")
+HAZARD_SPEECH_LABELS = hazard_registry.speech_labels_by_lang("en")
 
-HAZARD_LABELS_BY_LANG = {
-    "en": HAZARD_LABELS,
-    "ta": {
-        "coastal_flooding": "🌊 கடலோர வெள்ளம்",
-        "storm_surge": "🌀 புயல் அலைப்பெருக்கு",
-        "high_waves": "🌊 அதிக அலைகள்",
-        "tsunami": "⚠️ சுனாமி அறிகுறிகள்",
-        "rip_current": "🏊 இழுவை நீரோட்டம்",
-        "oil_spill": "🛢️ எண்ணெய் கசிவு",
-        "algal_bloom": "🟢 பாசி பெருக்கம் / மீன் இறப்பு",
-        "erosion": "🏖️ கடற்கரை அரிப்பு",
-        "other": "❓ மற்றவை",
-    },
-    "te": {
-        "coastal_flooding": "🌊 తీర వరదలు",
-        "storm_surge": "🌀 తుఫాను ఉప్పెన",
-        "high_waves": "🌊 ఎత్తైన అలలు",
-        "tsunami": "⚠️ సునామీ సూచనలు",
-        "rip_current": "🏊 లాగే ప్రవాహం",
-        "oil_spill": "🛢️ చమురు లీకేజీ",
-        "algal_bloom": "🟢 ఆల్గే వ్యాప్తి / చేపల మరణం",
-        "erosion": "🏖️ తీర కోత",
-        "other": "❓ ఇతర",
-    },
-}
-HAZARD_SPEECH_LABELS_BY_LANG = {
-    "en": HAZARD_SPEECH_LABELS,
-    "ta": {
-        "coastal_flooding": "கடலோர வெள்ளம்",
-        "storm_surge": "புயல் அலைப்பெருக்கு",
-        "high_waves": "அதிக அலைகள்",
-        "tsunami": "சுனாமி அறிகுறிகள்",
-        "rip_current": "இழுவை நீரோட்டம்",
-        "oil_spill": "எண்ணெய் கசிவு",
-        "algal_bloom": "பாசி பெருக்கம் அல்லது மீன் இறப்பு",
-        "erosion": "கடற்கரை அரிப்பு",
-        "other": "வேறு ஆபத்து",
-    },
-    "te": {
-        "coastal_flooding": "తీర వరదలు",
-        "storm_surge": "తుఫాను ఉప్పెన",
-        "high_waves": "ఎత్తైన అలలు",
-        "tsunami": "సునామీ సూచనలు",
-        "rip_current": "లాగే ప్రవాహం",
-        "oil_spill": "చమురు లీకేజీ",
-        "algal_bloom": "ఆల్గే వ్యాప్తి లేదా చేపల మరణం",
-        "erosion": "తీర కోత",
-        "other": "వేరే ప్రమాదం",
-    },
-}
-assert set(HAZARD_LABELS_BY_LANG) == set(HAZARD_SPEECH_LABELS_BY_LANG) == set(SUPPORTED_LANGS)
-for _lang in SUPPORTED_LANGS:
-    assert set(HAZARD_LABELS_BY_LANG[_lang]) == set(HAZARD_TYPES)
-    assert set(HAZARD_SPEECH_LABELS_BY_LANG[_lang]) == set(HAZARD_TYPES)
+HAZARD_LABELS_BY_LANG = {lang: hazard_registry.menu_labels_by_lang(lang) for lang in SUPPORTED_LANGS}
+HAZARD_SPEECH_LABELS_BY_LANG = {lang: hazard_registry.speech_labels_by_lang(lang) for lang in SUPPORTED_LANGS}
 
 
 def normalize_lang(lang: str | None) -> str:

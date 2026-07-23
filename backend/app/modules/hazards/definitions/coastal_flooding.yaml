@@ -1,0 +1,26 @@
+key: coastal_flooding
+order: 10
+
+menu_label:
+  en: "🌊 Coastal flooding"
+  ta: "🌊 கடலோர வெள்ளம்"
+  te: "🌊 తీర వరదలు"
+speech_label:
+  en: "coastal flooding"
+  ta: "கடலோர வெள்ளம்"
+  te: "తీర వరదలు"
+alert_label_en: "Coastal flooding"
+
+instrument_variables: [water_level, wave_height, air_pressure]
+satellite_recipe: sentinel1_water_extent
+cap_event_keywords: [coastal flood]
+
+faq:
+  - id: faq-coastal-flooding-general
+    title: "General information about coastal flooding"
+    content: >
+      Coastal flooding happens when sea water moves inland beyond its normal
+      extent, often driven by storm surge, high tides, or heavy wave action.
+      Low-lying coastal roads and ground-floor buildings near the shoreline are
+      typically affected first. Official advisories and local-authority guidance
+      should be your primary source for real-time safety decisions.

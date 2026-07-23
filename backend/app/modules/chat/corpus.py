@@ -10,18 +10,25 @@ plan as corpus sources too, but scraping a live advisory feed or building the
 shelters table (phase-2 milestone 6) is out of scope here - this ships the
 retrieval + generation + safety-gate seam with a real, useful, honest corpus
 rather than faking external sources this session has no way to verify.
-"""
 
-HAZARD_FAQ: list[dict] = [
+Per-hazard FAQ entries (tsunami signs, rip current safety, and so on) moved
+into the hazard registry itself (phase 4, milestone 2; see modules/hazards/)
+- adding a hazard's safety FAQ is now part of adding its YAML file, not a
+second edit here. What's left below is the FAQ content that isn't about any
+one hazard.
+"""
+from app.modules.hazards.registry import HAZARD_TYPES, faq_entries
+
+GENERAL_FAQ: list[dict] = [
     {
         "id": "faq-hazard-types",
         "title": "What hazard types does OceanPing track?",
         "content": (
-            "OceanPing tracks eight coastal hazard types: coastal flooding, storm surge, "
-            "high waves, tsunami warning signs, rip currents, oil spills, algal blooms, "
-            "and coastal erosion. Each report is classified into one of these types from "
-            "the reporter's description, and citizens can also pick a type directly when "
-            "submitting a report."
+            f"OceanPing tracks {len(HAZARD_TYPES) - 1} coastal hazard types: "
+            + ", ".join(h.replace("_", " ") for h in HAZARD_TYPES if h != "other")
+            + ". Each report is classified into one of these types from the reporter's "
+            "description, and citizens can also pick a type directly when submitting a "
+            "report."
         ),
     },
     {
@@ -49,52 +56,6 @@ HAZARD_FAQ: list[dict] = [
         ),
     },
     {
-        "id": "faq-tsunami-signs",
-        "title": "What are natural warning signs of a tsunami?",
-        "content": (
-            "Natural warning signs include: strong or long earthquake shaking near the "
-            "coast, the sea suddenly and unusually receding far from the shoreline and "
-            "exposing the sea floor, a loud roaring sound from the ocean, and unusual "
-            "rapid rises or falls in coastal water level. Coastal safety guidance is to "
-            "move to higher ground immediately if you observe these signs directly, "
-            "rather than waiting for an official alert."
-        ),
-    },
-    {
-        "id": "faq-rip-current-safety",
-        "title": "What should I know about rip currents?",
-        "content": (
-            "A rip current is a narrow, fast-moving channel of water flowing away from "
-            "the shore. General coastal-safety guidance for someone caught in one is to "
-            "stay calm, avoid swimming directly against the current, and instead swim "
-            "parallel to the shore until free of the current before swimming back at an "
-            "angle, signaling for help if unable to escape."
-        ),
-    },
-    {
-        "id": "faq-oil-spill-report",
-        "title": "What should I do if I see an oil spill?",
-        "content": (
-            "Report the location, extent, and any visible source of the spill through "
-            "OceanPing or to local coastal authorities. Avoid direct contact with spilled "
-            "oil and avoid consuming seafood from the affected area until authorities "
-            "confirm it is safe. OceanPing corroborates oil spill reports using satellite "
-            "imagery, since tide gauges and other instruments can't detect oil on the "
-            "water."
-        ),
-    },
-    {
-        "id": "faq-algal-bloom",
-        "title": "What is a harmful algal bloom and why does water color change?",
-        "content": (
-            "A harmful algal bloom is a rapid increase in algae that can discolor water "
-            "(often green, red, or brown) and is sometimes associated with fish kills or "
-            "unusual smells; some blooms produce toxins. If you notice discolored water, "
-            "dead fish, or unusual odors along the coast, avoid swimming in or eating "
-            "seafood from the affected area and report it."
-        ),
-    },
-    {
         "id": "faq-how-reporting-works",
         "title": "How does reporting a hazard on OceanPing work?",
         "content": (
@@ -115,27 +76,6 @@ HAZARD_FAQ: list[dict] = [
             "This lets the system weigh reports from an accurate track record more "
             "heavily, without ever letting trust alone unlock verified or warning status "
             "- a human analyst decision is always required for those."
-        ),
-    },
-    {
-        "id": "faq-coastal-flooding-general",
-        "title": "General information about coastal flooding",
-        "content": (
-            "Coastal flooding happens when sea water moves inland beyond its normal "
-            "extent, often driven by storm surge, high tides, or heavy wave action. "
-            "Low-lying coastal roads and ground-floor buildings near the shoreline are "
-            "typically affected first. Official advisories and local-authority guidance "
-            "should be your primary source for real-time safety decisions."
-        ),
-    },
-    {
-        "id": "faq-erosion",
-        "title": "What is coastal erosion?",
-        "content": (
-            "Coastal erosion is the gradual (or sometimes sudden, during storms) loss of "
-            "land or sand along a shoreline as waves and currents wear it away. "
-            "Structures built close to an eroding shoreline can become unstable over "
-            "time. Reporting visible erosion helps track changing coastlines."
         ),
     },
     {
@@ -162,7 +102,7 @@ def seed_corpus(db) -> int:
 
     embedder = nlp_classifier._load_model()
     updated = 0
-    for entry in HAZARD_FAQ:
+    for entry in GENERAL_FAQ + faq_entries():
         doc = db.get(RagDocument, entry["id"])
         if doc is None:
             doc = RagDocument(id=entry["id"])

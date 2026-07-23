@@ -1,0 +1,16 @@
+key: storm_surge
+order: 20
+
+menu_label:
+  en: "🌀 Storm surge"
+  ta: "🌀 புயல் அலைப்பெருக்கு"
+  te: "🌀 తుఫాను ఉప్పెన"
+speech_label:
+  en: "storm surge"
+  ta: "புயல் அலைப்பெருக்கு"
+  te: "తుఫాను ఉప్పెన"
+alert_label_en: "Storm surge"
+
+instrument_variables: [water_level, wave_height, air_pressure]
+satellite_recipe: sentinel1_water_extent
+cap_event_keywords: [storm surge, storm tide]

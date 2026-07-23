@@ -22,6 +22,7 @@ Hard rule enforced by the service layer: report volume alone can never
 escalate status — "corroborated" requires instrument, satellite, or official
 agreement, "verified" requires an analyst.
 """
+from app.modules.hazards.registry import instrument_variables_table
 
 WEIGHTS = {
     "trust": 0.17,
@@ -33,18 +34,10 @@ WEIGHTS = {
     "official": 0.15,
 }
 
-# Which instrument variables can corroborate which hazard claims.
-HAZARD_VARIABLES: dict[str, set[str]] = {
-    "coastal_flooding": {"water_level", "wave_height", "air_pressure"},
-    "storm_surge": {"water_level", "wave_height", "air_pressure"},
-    "high_waves": {"wave_height", "water_level"},
-    "tsunami": {"water_level", "wave_height"},
-    "rip_current": {"wave_height"},
-    "oil_spill": set(),      # no instrument signal — satellite (HAZARD_RECIPES) corroborates instead
-    "algal_bloom": set(),    # same — chlorophyll/NDCI anomaly is the corroboration path
-    "erosion": {"wave_height", "water_level"},
-    "other": {"water_level", "wave_height", "air_pressure"},
-}
+# Which instrument variables can corroborate which hazard claims — sourced
+# from the hazard registry (phase 4, milestone 2; see modules/hazards/) so a
+# new hazard's corroboration rule is a config file, not a code edit here.
+HAZARD_VARIABLES: dict[str, set[str]] = instrument_variables_table()
 
 MEDIA_NEUTRAL = 0.5  # score for reports without any media attached
 HEARSAY_DISCOUNT = 0.5  # a secondhand account counts for half its coherence contribution

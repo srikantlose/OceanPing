@@ -6,31 +6,18 @@ exists via `alerts/service.py::issue_warning()`, which requires an analyst
 identity. This mirrors the no-citizen-only-escalation rule already enforced
 for report status in `scoring/service.py`.
 """
-from app.modules.ingest.report_conversation import HAZARD_SPEECH_LABELS_BY_LANG, SUPPORTED_LANGS
+from app.modules.hazards.registry import SUPPORTED_LANGS, alert_labels_by_lang
 
 TIER_RANK = {"advisory": 0, "watch": 1, "warning": 2}
 
-# Alert body text uses the plain-text (no-emoji) hazard names — the same
-# ones ingest/report_conversation.py already maintains for speech/TTS
-# contexts, since an alert sentence is a similarly formal setting. English
-# keeps its own Title Case form rather than that dict's lowercase one; the
-# tier emoji at the front of the sentence is decoration enough.
-HAZARD_LABELS = {
-    "coastal_flooding": "Coastal flooding",
-    "storm_surge": "Storm surge",
-    "high_waves": "High waves",
-    "tsunami": "Tsunami signs",
-    "rip_current": "Rip current",
-    "oil_spill": "Oil spill",
-    "algal_bloom": "Algal bloom",
-    "erosion": "Coastal erosion",
-    "other": "Coastal hazard",
-}
-HAZARD_LABELS_BY_LANG = {
-    "en": HAZARD_LABELS,
-    "ta": HAZARD_SPEECH_LABELS_BY_LANG["ta"],
-    "te": HAZARD_SPEECH_LABELS_BY_LANG["te"],
-}
+# Alert body text uses each hazard's curated alert-label copy (see
+# modules/hazards/) — English gets its own Title Case phrasing distinct from
+# the menu/speech copy; Tamil/Telugu reuse the same speech label an alert
+# sentence would use conversationally, since this app has never maintained a
+# separate translated alert register. The tier emoji at the front of the
+# sentence is decoration enough that the label itself doesn't need one.
+HAZARD_LABELS_BY_LANG = {lang: alert_labels_by_lang(lang) for lang in SUPPORTED_LANGS}
+HAZARD_LABELS = HAZARD_LABELS_BY_LANG["en"]
 
 TIER_EMOJI = {"advisory": "\U0001F535", "watch": "\U0001F7E1", "warning": "\U0001F534"}
 

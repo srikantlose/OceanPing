@@ -1,0 +1,15 @@
+key: high_waves
+order: 30
+
+menu_label:
+  en: "🌊 High waves"
+  ta: "🌊 அதிக அலைகள்"
+  te: "🌊 ఎత్తైన అలలు"
+speech_label:
+  en: "high waves"
+  ta: "அதிக அலைகள்"
+  te: "ఎత్తైన అలలు"
+alert_label_en: "High waves"
+
+instrument_variables: [wave_height, water_level]
+cap_event_keywords: [high wave, high surf]

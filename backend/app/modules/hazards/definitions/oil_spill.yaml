@@ -1,0 +1,28 @@
+key: oil_spill
+order: 60
+
+menu_label:
+  en: "🛢️ Oil spill"
+  ta: "🛢️ எண்ணெய் கசிவு"
+  te: "🛢️ చమురు లీకేజీ"
+speech_label:
+  en: "oil spill"
+  ta: "எண்ணெய் கசிவு"
+  te: "చమురు లీకేజీ"
+alert_label_en: "Oil spill"
+
+# No instrument signal — satellite (see satellite_recipe below) corroborates instead.
+instrument_variables: []
+satellite_recipe: sentinel1_sar_dark_slick
+cap_event_keywords: [oil spill]
+
+faq:
+  - id: faq-oil-spill-report
+    title: "What should I do if I see an oil spill?"
+    content: >
+      Report the location, extent, and any visible source of the spill through
+      OceanPing or to local coastal authorities. Avoid direct contact with spilled
+      oil and avoid consuming seafood from the affected area until authorities
+      confirm it is safe. OceanPing corroborates oil spill reports using satellite
+      imagery, since tide gauges and other instruments can't detect oil on the
+      water.

@@ -1,0 +1,25 @@
+key: rip_current
+order: 50
+
+menu_label:
+  en: "🏊 Rip current"
+  ta: "🏊 இழுவை நீரோட்டம்"
+  te: "🏊 లాగే ప్రవాహం"
+speech_label:
+  en: "rip current"
+  ta: "இழுவை நீரோட்டம்"
+  te: "లాగే ప్రవాహం"
+alert_label_en: "Rip current"
+
+instrument_variables: [wave_height]
+cap_event_keywords: [rip current]
+
+faq:
+  - id: faq-rip-current-safety
+    title: "What should I know about rip currents?"
+    content: >
+      A rip current is a narrow, fast-moving channel of water flowing away from
+      the shore. General coastal-safety guidance for someone caught in one is to
+      stay calm, avoid swimming directly against the current, and instead swim
+      parallel to the shore until free of the current before swimming back at an
+      angle, signaling for help if unable to escape.
