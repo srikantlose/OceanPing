@@ -266,6 +266,38 @@ class AlertDelivery(Base):
     attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class OfficialAdvisory(Base):
+    __tablename__ = "official_advisories"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=new_uuid)
+    # CAP <identifier>, scoped to <sender> — a re-delivered copy of the same
+    # message (a retried webhook) is deliberately not deduped on this alone
+    # (see cap_service.py::ingest_cap_document), since a real agency can also
+    # reuse an identifier space across senders.
+    cap_identifier: Mapped[str] = mapped_column(String(256), index=True)
+    sender: Mapped[str] = mapped_column(String(256))
+    event: Mapped[str] = mapped_column(String(256))  # raw CAP <event> text, kept verbatim
+    # None when the raw <event> text doesn't map to a hazard this app models
+    # (see cap_ingest.py::map_event_to_hazard) — such rows are never created
+    # in the first place, but the column stays nullable for that honesty.
+    hazard_type: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    urgency: Mapped[str] = mapped_column(String(16))
+    severity: Mapped[str] = mapped_column(String(16))
+    certainty: Mapped[str] = mapped_column(String(16))
+    msg_type: Mapped[str] = mapped_column(String(16))  # Alert | Update | Cancel
+    headline: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # One row per CAP <area> block (a message covering several disjoint areas
+    # becomes several rows sharing cap_identifier). Exactly one of these two
+    # is set, matching CAP's own polygon-or-circle area shapes.
+    area_polygon: Mapped[list | None] = mapped_column(JSONB, nullable=True)  # [[lat, lon], ...] ring
+    area_circle: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # {"lat", "lon", "radius_km"}
+    effective_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    raw_xml: Mapped[str] = mapped_column(Text)
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
 class TrainingExample(Base):
     __tablename__ = "training_examples"
 

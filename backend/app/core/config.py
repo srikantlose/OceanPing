@@ -289,6 +289,23 @@ class Settings(BaseSettings):
     # pipeline_mode is "bus"; inline mode has no lag concept and never sheds.
     load_shed_lag_threshold: int = 500
 
+    # CAP interop (phase 4, milestone 1): every issued alert also renders as a
+    # real CAP 1.2 document (see modules/alerts/cap.py), validated in tests
+    # against the actual OASIS-published CAP-v1.2.xsd — so agency integration
+    # (NDMA/SACHET) becomes a config/partnership step whenever it lands, not
+    # an engineering project (the plan's own framing: "build the generator
+    # before the partnership exists"). No real partner sender identity exists
+    # yet, so cap_sender/cap_sender_name are pilot placeholders, swappable via
+    # env the day one does. Inbound ingestion (cap_ingest.py + cap_service.py)
+    # treats an *active* official CAP advisory covering a report's location as
+    # a corroboration signal in scoring/service.py — cap_ingest_api_key gates
+    # the ingestion webhook the same credential-checked-if-set,
+    # skipped-if-empty way whatsapp_app_secret gates that webhook's signature.
+    cap_sender: str = "pilot@oceanping.example"
+    cap_sender_name: str = "OceanPing Pilot"
+    public_base_url: str = "http://localhost:3000"
+    cap_ingest_api_key: str = ""
+
     class Config:
         env_file = ".env"
         extra = "ignore"

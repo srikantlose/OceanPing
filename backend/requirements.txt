@@ -24,4 +24,5 @@ itsdangerous>=2.2
 python-multipart>=0.0.9
 paho-mqtt>=2.1
 confluent-kafka>=2.5
+lxml>=5.0
 pytest>=8.0

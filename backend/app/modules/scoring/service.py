@@ -20,6 +20,7 @@ from app.models import (
     TrainingExample,
     Verification,
 )
+from app.modules.alerts.cap_service import official_advisory_for
 from app.modules.alerts.service import sync_incident_alert
 from app.modules.nlp import classifier
 from app.modules.satellite.providers import HAZARD_RECIPES
@@ -120,6 +121,25 @@ def _satellite_observations(db: Session, report: Report) -> list[dict]:
     ]
 
 
+def _official_advisory(db: Session, report: Report) -> dict | None:
+    """An active official CAP advisory (phase 4, milestone 1 — see
+    alerts/cap_ingest.py + cap_service.py) covering this report's hazard and
+    location, or None. Feeds engine.official_score() (the seven-signal
+    rebalance) and, like instrument/satellite, also gates escalation to
+    "corroborated" below — the same non-citizen-controlled role they play,
+    not a replacement for either."""
+    advisory = official_advisory_for(db, report.hazard_type, report.lat, report.lon)
+    if advisory is None:
+        return None
+    return {
+        "id": str(advisory.id),
+        "sender": advisory.sender,
+        "event": advisory.event,
+        "severity": advisory.severity,
+        "certainty": advisory.certainty,
+    }
+
+
 def _account_device_score(report: Report) -> float:
     """Reporter age + recent-report burst, reusing the same Redis counter
     ingest/service.py's rate limiter already increments — no new I/O path."""
@@ -135,17 +155,19 @@ def _account_device_score(report: Report) -> float:
 
 def rescore_report(db: Session, report: Report) -> float:
     """Recompute confidence; escalate unverified→corroborated only with
-    instrument or satellite agreement (the no-citizen-only-escalation rule —
-    report volume/trust/coherence alone still never gets there). Satellite
-    only has a recipe for a handful of slow hazards (oil_spill, algal_bloom,
-    coastal_flooding, storm_surge — see HAZARD_RECIPES), so fast hazards like
-    tsunami/rip_current still gate on instrument alone, same as before.
+    instrument, satellite, or official-advisory agreement (the no-citizen-
+    only-escalation rule — report volume/trust/coherence alone still never
+    gets there). Satellite only has a recipe for a handful of slow hazards
+    (oil_spill, algal_bloom, coastal_flooding, storm_surge — see
+    HAZARD_RECIPES), so fast hazards like tsunami/rip_current gate on
+    instrument or official alone, same as before official existed.
     Flushes, no commit."""
     settings = get_settings()
     n_independent = _coherence_count(db, report)
     anomalies = _instrument_zscores(db, report)
     hearsay = classifier.detect_hearsay(report.text)
     satellite_observations = _satellite_observations(db, report)
+    official_advisory = _official_advisory(db, report)
     prev = report.confidence_components or {}
     components = {
         "trust": round(report.reporter.trust_score, 4),
@@ -154,12 +176,14 @@ def rescore_report(db: Session, report: Report) -> float:
         "media": prev.get("media", engine.MEDIA_NEUTRAL),
         "satellite": engine.satellite_score([o["score"] for o in satellite_observations]),
         "account_device": _account_device_score(report),
+        "official": engine.official_score(official_advisory),
     }
     detail = {
         "n_independent_reports": n_independent,
         "corroborating_anomalies": anomalies,
         "hearsay": hearsay,
         "satellite_observations": satellite_observations,
+        "official_advisory": official_advisory,
         # forensics are computed once at ingest; carry them across rescores
         "media_forensics": prev.get("media_forensics") or (prev.get("detail") or {}).get("media_forensics"),
     }
@@ -171,7 +195,7 @@ def rescore_report(db: Session, report: Report) -> float:
     if (
         report.status == "unverified"
         and new_confidence >= settings.corroborated_threshold
-        and (components["instrument"] > 0 or components["satellite"] > 0)
+        and (components["instrument"] > 0 or components["satellite"] > 0 or components["official"] > 0)
     ):
         report.status = "corroborated"
         append_audit(

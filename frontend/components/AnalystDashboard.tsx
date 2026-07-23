@@ -21,6 +21,7 @@ const COMPONENT_LABELS: Record<string, string> = {
   media: "Media",
   satellite: "Satellite",
   account_device: "Account/device",
+  official: "Official advisory",
 };
 
 function StatusChip({ status }: { status: string }) {
@@ -98,6 +99,12 @@ function ConfidenceBars({ report }: { report: any }) {
           anomaly(ies): {comp.detail.corroborating_anomalies
             .map((a: any) => `${a.station_id} ${a.variable} z=${a.zscore}`)
             .join("; ")}
+        </div>
+      )}
+      {comp.detail?.official_advisory && (
+        <div style={{ fontSize: 12, color: "var(--warning)", marginTop: 6 }}>
+          📋 official advisory active over this location: {comp.detail.official_advisory.event}
+          {" "}({comp.detail.official_advisory.sender}, certainty {comp.detail.official_advisory.certainty})
         </div>
       )}
       {comp.detail && (

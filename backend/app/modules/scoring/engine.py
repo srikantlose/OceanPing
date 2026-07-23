@@ -1,7 +1,7 @@
 """Confidence engine v1 — pure functions, no I/O.
 
-confidence = 0.20*trust + 0.25*coherence + 0.25*instrument + 0.15*media
-             + 0.10*satellite + 0.05*account_device
+confidence = 0.17*trust + 0.21*coherence + 0.21*instrument + 0.13*media
+             + 0.09*satellite + 0.04*account_device + 0.15*official
 
 Six-signal rebalance (phase 2, milestone 2): satellite and account/device
 join as slow, non-citizen-controlled corroboration signals. Satellite
@@ -9,18 +9,28 @@ latency is hours, so it corroborates slow hazards, never gates fast ones —
 hazards with no satellite recipe (see satellite/providers.py::HAZARD_RECIPES)
 just carry a 0 there, same as instrument does today for oil_spill.
 
+Seven-signal rebalance (phase 4, milestone 1): "official" joins as a real
+CAP-advisory corroboration signal (see alerts/cap_ingest.py +
+alerts/cap_service.py) — an active government warning covering a report's
+exact location, scaled by the issuing agency's own stated certainty. Every
+other weight is trimmed by the same 15% (0.85x, then rounded) to make room,
+rather than singling one signal out to absorb the whole cut, since an
+official advisory is meant to sit alongside instrument/satellite as a
+non-citizen-controlled check, not replace either of them.
+
 Hard rule enforced by the service layer: report volume alone can never
-escalate status — "corroborated" requires instrument agreement, "verified"
-requires an analyst.
+escalate status — "corroborated" requires instrument, satellite, or official
+agreement, "verified" requires an analyst.
 """
 
 WEIGHTS = {
-    "trust": 0.20,
-    "coherence": 0.25,
-    "instrument": 0.25,
-    "media": 0.15,
-    "satellite": 0.10,
-    "account_device": 0.05,
+    "trust": 0.17,
+    "coherence": 0.21,
+    "instrument": 0.21,
+    "media": 0.13,
+    "satellite": 0.09,
+    "account_device": 0.04,
+    "official": 0.15,
 }
 
 # Which instrument variables can corroborate which hazard claims.
@@ -86,6 +96,21 @@ def satellite_score(scores: list[float]) -> float:
     against, so it stays 0 rather than neutral (same call as instrument_score
     makes for hazards it can't corroborate)."""
     return max(scores) if scores else 0.0
+
+
+OFFICIAL_CERTAINTY_SCORE = {"Observed": 1.0, "Likely": 0.7, "Possible": 0.4, "Unknown": 0.2}
+
+
+def official_score(advisory: dict | None) -> float:
+    """0 with no active official CAP advisory covering this report's location
+    and hazard (see alerts/cap_service.py::official_advisory_for) — absence
+    of evidence, not evidence against, same posture as satellite_score.
+    Otherwise scaled by the issuing agency's own stated <certainty>, since a
+    "Possible" advisory shouldn't corroborate as strongly as an "Observed"
+    one — the same real-world caveat CAP's own schema encodes."""
+    if advisory is None:
+        return 0.0
+    return OFFICIAL_CERTAINTY_SCORE.get(advisory.get("certainty"), 0.2)
 
 
 ACCOUNT_AGE_SATURATION_HOURS = 24 * 7  # a week-old account scores like any established one

@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -60,6 +61,36 @@ def test_satellite_observations_serializes_rows():
         "scene_time": now.isoformat(),
         "scene_url": "stub://x",
     }]
+
+
+class _FakeReportForOfficial:
+    def __init__(self, hazard_type, lat, lon):
+        self.hazard_type = hazard_type
+        self.lat = lat
+        self.lon = lon
+
+
+def test_official_advisory_returns_none_without_a_match(monkeypatch):
+    monkeypatch.setattr(service, "official_advisory_for", lambda db, hazard_type, lat, lon: None)
+    report = _FakeReportForOfficial("tsunami", 13.05, 80.28)
+    assert service._official_advisory(db=None, report=report) is None
+
+
+def test_official_advisory_serializes_the_matched_row(monkeypatch):
+    advisory = SimpleNamespace(
+        id="adv-1", sender="alerts@imd.gov.in", event="Tsunami Warning",
+        severity="Severe", certainty="Observed",
+    )
+    monkeypatch.setattr(service, "official_advisory_for", lambda db, hazard_type, lat, lon: advisory)
+    report = _FakeReportForOfficial("tsunami", 13.05, 80.28)
+    result = service._official_advisory(db=None, report=report)
+    assert result == {
+        "id": "adv-1",
+        "sender": "alerts@imd.gov.in",
+        "event": "Tsunami Warning",
+        "severity": "Severe",
+        "certainty": "Observed",
+    }
 
 
 class _FakeReporter:
