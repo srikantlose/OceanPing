@@ -116,6 +116,14 @@ class Report(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, index=True
     )
+    # Open-data retention (phase 4, milestone 3): set once
+    # modules/opendata/service.py::anonymize_expired_reports has overwritten
+    # lat/lon/geom with this report's H3 cell centroid, so the job never
+    # reprocesses (or re-audits) the same row on a later tick. Null means the
+    # exact GPS location is still stored as submitted.
+    location_anonymized_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     reporter: Mapped[Reporter] = relationship(back_populates="reports")
     incident: Mapped[Incident | None] = relationship(back_populates="reports")
@@ -645,6 +653,54 @@ class MissingPerson(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
     reporter: Mapped[Reporter] = relationship()
+
+
+class ApiKey(Base):
+    """A researcher/consumer credential for the open-data API (phase 4,
+    milestone 3). Only a hash of the raw key is ever stored — see
+    modules/opendata/service.py::create_api_key/verify_api_key — the same
+    "never persist the credential itself" posture a password would get,
+    even though this is a machine credential rather than a login. Revocation
+    is a timestamp, not a delete, so a revoked key's audit trail (who minted
+    it, when, its last use) survives."""
+    __tablename__ = "api_keys"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=new_uuid)
+    label: Mapped[str] = mapped_column(String(128))
+    key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    key_prefix: Mapped[str] = mapped_column(String(16))  # display-only, never enough to reconstruct the key
+    created_by: Mapped[str] = mapped_column(String(128))  # analyst username who minted it
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DatasetRelease(Base):
+    """A frozen, published snapshot from the open-data pipeline (phase 4,
+    milestone 3) — see modules/opendata/service.py::build_dataset_release.
+    `content` is the already-k-anonymized, already-DP-noised row set itself
+    (pilot volumes are small enough to store the release inline, same
+    posture as Sitrep.content); `checksum` is a sha256 of that exact content
+    so a citing researcher can verify they still have the data as released.
+    `doi` stays null until an operator registers the release with an
+    external DOI provider (e.g. DataCite/Zenodo) and fills it in by hand —
+    that registration step is outside this app, same as cap_sender being a
+    pilot placeholder until a real partnership exists."""
+    __tablename__ = "dataset_releases"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=new_uuid)
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    h3_resolution: Mapped[int] = mapped_column(Integer)
+    k_anonymity_min: Mapped[int] = mapped_column(Integer)
+    dp_epsilon: Mapped[float] = mapped_column(Float)
+    row_count: Mapped[int] = mapped_column(Integer)
+    suppressed_group_count: Mapped[int] = mapped_column(Integer, default=0)
+    content: Mapped[list] = mapped_column(JSONB, default=list)
+    checksum: Mapped[str] = mapped_column(String(64))
+    doi: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
 Index("ix_reports_cell_time", Report.h3_cell, Report.created_at)

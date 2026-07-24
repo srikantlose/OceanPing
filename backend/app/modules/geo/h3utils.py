@@ -18,3 +18,11 @@ def cell_polygon(cell: str) -> list[list[float]]:
     ring = [[lon, lat] for lat, lon in boundary]
     ring.append(ring[0])
     return ring
+
+
+def cell_to_parent(cell: str, resolution: int) -> str:
+    """Coarsen a cell to an ancestor resolution — used by the open-data
+    aggregation pipeline (phase 4, milestone 3) to group reports into larger
+    cells than the internal res-8 grid before any k-anonymity/DP step, since
+    a bigger cell means a bigger natural group size."""
+    return h3.cell_to_parent(cell, resolution)

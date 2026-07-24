@@ -73,6 +73,7 @@ def build_scheduler() -> BackgroundScheduler:
         validate_forecasts,
     )
     from app.modules.narratives.service import detect_narratives
+    from app.modules.opendata.service import anonymize_expired_reports
     from app.modules.recovery.service import purge_expired_missing_persons
     from app.modules.satellite.service import poll_satellite
     from app.modules.scoring.service import rescore_recent
@@ -90,6 +91,8 @@ def build_scheduler() -> BackgroundScheduler:
                       id="rescore_recent")
     scheduler.add_job(_job(purge_expired_missing_persons), "interval", hours=24,
                       id="missing_person_retention_purge")
+    scheduler.add_job(_job(anonymize_expired_reports), "interval", hours=24,
+                      id="opendata_location_retention")
     # Analytics jobs (phase 3, milestone 8's "defer analytics consumers" exit
     # criterion) — deferred for a tick when the bus pipeline's nlp consumer
     # is backed up past load_shed_lag_threshold; see _should_shed_analytics().

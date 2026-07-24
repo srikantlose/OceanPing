@@ -306,6 +306,26 @@ class Settings(BaseSettings):
     public_base_url: str = "http://localhost:3000"
     cap_ingest_api_key: str = ""
 
+    # Open data & research API (phase 4, milestone 3): anonymized, H3-
+    # aggregated event datasets for researchers, gated by per-consumer API
+    # keys (see modules/opendata/). The k-anonymity floor is enforced on the
+    # *true* count before any DP noise is added — noise can't retroactively
+    # hide that a raw count of 1 was ever computed, so a group under the
+    # floor is dropped outright rather than noised. open_data_h3_resolution
+    # is deliberately coarser than the internal res-8 report grid (see
+    # geo/h3utils.py) so aggregation groups start out bigger before k-anon
+    # even has to suppress anything.
+    open_data_h3_resolution: int = 6
+    open_data_k_anonymity_min: int = 5
+    open_data_dp_epsilon: float = 1.0
+    open_data_rate_limit_per_hour: int = 200
+    # DPDP-style retention: once a report is this many months old, its exact
+    # lat/lon/geom are permanently overwritten with its H3 cell's centroid —
+    # see modules/opendata/service.py::anonymize_expired_reports, a real
+    # scheduled job (core/scheduler.py), the same "policy enforced by code,
+    # not just written down" posture as recovery_missing_person_retention_days.
+    open_data_retention_months: float = 12.0
+
     class Config:
         env_file = ".env"
         extra = "ignore"

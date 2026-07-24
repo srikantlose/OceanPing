@@ -1,10 +1,11 @@
 # Phase 4 — Scale, Openness & Sustainability (months 11+, gap plan)
 
-**Status: 🟡 milestones 1–2 built** (CAP + official interop; hazard registry refactor).
-Prereqs: phase 3 (service split, mobile app, verified-event corpus) — all met. This
-phase is thematic rather than strictly sequential — items are largely independent
-tracks; pick by pilot/partner pull. The remaining five milestones (federated learning,
-AR, open data, multi-state tenanting, insurance API) are all still planned.
+**Status: 🟡 milestones 1–3 built** (CAP + official interop; hazard registry refactor;
+open-data pipeline with DP + retention jobs). Prereqs: phase 3 (service split, mobile
+app, verified-event corpus) — all met. This phase is thematic rather than strictly
+sequential — items are largely independent tracks; pick by pilot/partner pull. The
+remaining four milestones (federated learning, AR, multi-state tenanting, insurance
+API) are all still planned.
 
 ## Goals
 
@@ -303,11 +304,128 @@ keywords are also untouched — those are ML training data, not behavioral confi
 genuinely new hazard still needs its own classifier examples the same way it always
 has; that's inherent to supervised classification, not a registry limitation.
 
+## Milestone 3 — as built (open-data pipeline with DP + retention jobs)
+
+Built to the plan's own two-part framing: "anonymized event datasets: H3-aggregated,
+k-anonymity floor + differential-privacy noise on counts" plus "retention/anonymization
+jobs... implement as a scheduled job with audit entries." Both halves are real, live-
+verified pipelines against the real running stack, not illustrative stubs.
+
+**`modules/opendata/service.py::aggregate_events()` + `build_dataset_release()`.**
+Verified reports (`status="verified"` only — the same trust bar `/map/reports` already
+applies) in a requested `[period_start, period_end)` window are grouped by
+`(H3 cell coarsened to open_data_h3_resolution, hazard_type, calendar day)` — resolution
+6 by default, deliberately coarser than the internal resolution-8 report grid (see
+`geo/h3utils.py::cell_to_parent`, new in this milestone), so groups start out bigger
+before k-anonymity even has to suppress anything. A group whose *true* report count
+falls below `open_data_k_anonymity_min` (default 5) is dropped outright — not noised —
+since Laplace noise cannot retroactively hide that a raw count of 1-4 was ever computed;
+the floor has to be enforced before noise, not instead of it. Every surviving group then
+gets independent Laplace-mechanism DP noise (`scale = 1/open_data_dp_epsilon`, default
+epsilon 1.0), rounded to the nearest non-negative integer. `build_dataset_release()`
+freezes one run of this as a `DatasetRelease` row — `content` holds the released rows
+inline (pilot volumes are small enough, same posture as `Sitrep.content`), `checksum` is
+a sha256 of that exact content so a citing researcher can verify their copy still
+matches what was published, and `doi` stays null until an operator registers a specific
+release with an external provider (DataCite/Zenodo) and fills it in by hand — same
+pilot-placeholder posture as `cap_sender` in milestone 1.
+
+**API keys (`ApiKey` model) — `create_api_key()`/`verify_api_key()`/`revoke_api_key()`.**
+Only a sha256 hash of the raw bearer secret is ever persisted; the raw key
+(`op_live_<24 random bytes, url-safe>`) is returned exactly once, at minting time
+(`POST /analyst/opendata/api-keys`, analyst-only) — the same "never store the
+credential itself" posture a password would get, even though this is a machine
+credential. Revocation is a timestamp (`revoked_at`), not a delete, so a revoked key's
+audit trail survives; `verify_api_key()` treats an unknown key and a revoked key
+identically (both return `None`) so a caller can't distinguish "never existed" from
+"existed and was cut off."
+
+**Rate limiting — `check_rate_limit()`.** The exact same real-Redis
+`INCR`-plus-`EXPIRE` pattern `ingest/service.py::_check_rate_limits` already uses for
+report submission, scoped per API key (`rl:apikey:{key_id}`, 3600s window,
+`open_data_rate_limit_per_hour` cap, default 200/hour) instead of per-reporter/cell.
+Same fail-open posture on a Redis outage: a briefly-unthrottled public research API is
+a far smaller risk than an unusable one during a Redis blip.
+
+**Retention/anonymization job — `anonymize_expired_reports()`.** The DPDP-style half of
+this milestone: once a `Report` is older than `open_data_retention_months` (default 12),
+its exact `lat`/`lon`/`geom` are permanently overwritten with its own H3 cell's centroid
+— the same fuzzing every public read path (`geo/router.py`, `recovery/service.py`)
+already applies at *read* time, now made a one-way *write*-time reduction in stored
+precision instead. Unlike `recovery/service.py::purge_expired_missing_persons` (its
+closest precedent — same real-scheduled-job-not-just-policy posture, same "one audit
+entry per batch, no PII in the payload" convention), this job never deletes a `Report`:
+hazard type, confidence, incident linkage, and `h3_cell` itself (already ~0.7 km²,
+the unit every downstream aggregation already works from) are all untouched — only
+location precision degrades, and only once, tracked via the new
+`Report.location_anonymized_at` column so a later tick never reprocesses (or re-audits)
+the same row. Registered in `core/scheduler.py` as a real 24-hourly job, in the "never
+shed" group alongside the missing-person retention purge — not one of the deferrable
+analytics jobs.
+
+**Public vs. gated surface (`modules/opendata/router.py`).** The dataset *catalog*
+(`GET /opendata/datasets`) is fully public, no key required — a researcher needs to see
+what exists before requesting a key, and a catalog entry carries only aggregate
+metadata (row/suppressed-group counts, DP parameters, checksum), never raw rows. The
+actual data *download* (`GET /opendata/datasets/{id}`) is the one gated, rate-limited
+endpoint, since that's the resource worth controlling and metering.
+
+**Verified in two layers**, matching this project's established unit-vs-live split:
+- `tests/test_opendata_service.py` (18 tests) — API-key lifecycle (hash-only storage,
+  accept/reject/revoke), rate limiting (allows-under-cap, raises-over-cap, fails open
+  on a simulated Redis outage), the Laplace-noise helper's statistical shape
+  (zero-centered, smaller epsilon = more noise), k-anonymity suppression and DP-noise
+  application in isolation (noise monkeypatched to zero to test the grouping/rounding
+  logic precisely), dataset-release persistence + checksum, and the retention job's
+  lat/lon/geom overwrite + audit entry.
+- `scripts/opendata_live_check.py` (rerunnable against the persistent dev stack, same
+  convention as `cap_live_check.py`/`hazard_registry_live_check.py`) — a **controlled
+  re-identification check**, not just "suppressed_group_count > 0 somewhere": since
+  `apply_verification()` is the only code path that ever sets `Report.status="verified"`
+  (see `scoring/service.py`'s own docstring) and a release's window is bound to
+  `Report.created_at`, submitting-and-verifying exactly 2 reports (below the k=5 floor)
+  at one never-before-used location and 6 reports (at the floor) at another, then
+  building a release over exactly that just-created window, makes the release's exact
+  shape predictable: `suppressed_group_count == 1`, `row_count == 1`, and the one
+  released row is the 6-report batch, DP-noised but non-negative. Also verified: the
+  public catalog needs no key; download is 401 with none and 403 with an invalid or a
+  revoked one; a freshly minted key's raw secret is shown exactly once and never appears
+  in the key listing; rate limiting really returns 429 once ~200 requests land on one
+  key. Separately, the retention job was live-verified directly against the real
+  Postgres database (not the script above, since the default 12-month window can't be
+  reached by submitting a report through the API today): a report was submitted, its
+  `created_at` backdated to 400 days ago via `psql`, `anonymize_expired_reports()` was
+  invoked directly against the real `SessionLocal`, and the row's `lat`/`lon` were
+  confirmed overwritten to its `h3_cell`'s exact centroid, `location_anonymized_at` set,
+  and a real `opendata.locations_anonymized` audit entry with no PII landed in the real
+  chain — then a second invocation confirmed 0 rows processed (idempotent, since
+  `location_anonymized_at` is now set).
+
+Backend suite: 519 → 537 tests (18 new, all in `test_opendata_service.py`), all
+passing, plus a clean `alembic upgrade head` (migration `0019_opendata`, adding
+`api_keys`/`dataset_releases` tables and `reports.location_anonymized_at`) and a clean
+`docker compose build` for `backend` (no new dependency — `numpy` was already present
+for the classifier/scoring stack and covers the Laplace-noise draw). No frontend
+change.
+
+Also added: `docs/opendata-datasheet.md`, a "Datasheets for Datasets"-style document
+(Gebru et al. convention) covering motivation, composition, the anonymization
+mechanism in detail, collection process, uses/misuses, distribution, and maintenance —
+the plan's own "publish a datasheet" instruction.
+
+**Not built, deliberately:** an automatic release cadence — `POST
+/analyst/opendata/releases` is analyst-triggered, on purpose, since publishing implies
+a review step (a human should see `suppressed_group_count`/`row_count` before anything
+goes out) rather than a fully automatic schedule. Real DOI registration and a chosen
+license are both external/decision steps left as placeholders (`DatasetRelease.doi`,
+the datasheet's licensing section), the same "pilot placeholder swappable the day a
+real integration lands" posture as `cap_sender`/`cap_sender_name` in milestone 1.
+
 ## Milestones
 
 1. CAP generator + inbound CAP corroboration — ✅ built, see above
 2. Hazard registry refactor (config-only new hazards) — ✅ built, see below
-3. Open-data pipeline with DP + retention jobs
+3. Open-data pipeline with DP + retention jobs — ✅ built, see below
 4. Multi-state tenanting + per-district metrics
 5. Vulnerability-aware alerting (with DPO review)
 6. AR mode; federated learning spike → go/no-go
@@ -320,7 +438,11 @@ has; that's inherent to supervised classification, not a registry limitation.
   `tests/test_cap_ingest.py::test_round_trips_our_own_generator_output` is the round
   trip; `scripts/cap_live_check.py` proves the same against the real running stack,
   including geo-scoped corroboration and cancel/expiry).
-- DP: re-identification test on released aggregates (no cell below k threshold).
+- DP: re-identification test on released aggregates (no cell below k threshold) —
+  ✅ done (`tests/test_opendata_service.py` proves suppression happens on the *true*
+  count before noise; `scripts/opendata_live_check.py` proves it against the real
+  running stack with a controlled below-floor batch that never appears in the output
+  and an at-floor batch that does).
 - Tenanting: cross-state analyst cannot read another state's exact coordinates (authz test).
 - Hazard registry: add a toy hazard purely via config → report→score→alert path works in
   drill with zero code diff outside the registry — ✅ done (`tests/test_hazard_registry.py`
