@@ -11,7 +11,11 @@ from app.models import Incident, Report, SensorReading, Shelter, Station, Statio
 from app.modules.geo.h3utils import cell_centroid, cell_polygon
 from app.modules.geo.hotspots import hotspots_geojson
 from app.modules.forecast.service import station_forecast_series
-from app.modules.inundation.service import flooded_cells_geojson, forecast_flooded_cells_geojson
+from app.modules.inundation.service import (
+    flooded_cells_geojson,
+    forecast_flooded_cells_geojson,
+    predicted_depth_at_point,
+)
 from app.modules.recovery.service import public_damage_features
 
 router = APIRouter(prefix="/map", tags=["map"])
@@ -107,6 +111,17 @@ def inundation_forecast(hours_ahead: float = 2.0, db: Session = Depends(get_db))
     if result is None:
         raise HTTPException(status_code=404, detail="No sensor forecast available yet for this variable")
     return result
+
+
+@router.get("/inundation/point")
+def inundation_point(lat: float, lon: float, hours_ahead: float = 0.0, db: Session = Depends(get_db)) -> dict:
+    """Predicted water depth at a single point (AR mode's data source, phase 4
+    milestone 6) rather than a whole cell-set map — see
+    modules/inundation/service.py::predicted_depth_at_point. Degrades to
+    depth_m=null/flooded=false instead of erroring when there's no fresh
+    reading, no forecast, or no DEM coverage at this point, so a client can
+    render a normal camera view with nothing overlaid."""
+    return predicted_depth_at_point(db, lat, lon, hours_ahead=hours_ahead)
 
 
 @router.get("/damage")

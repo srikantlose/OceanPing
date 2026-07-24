@@ -1,11 +1,14 @@
 # Phase 4 — Scale, Openness & Sustainability (months 11+, gap plan)
 
-**Status: 🟡 milestones 1–3 built** (CAP + official interop; hazard registry refactor;
-open-data pipeline with DP + retention jobs). Prereqs: phase 3 (service split, mobile
-app, verified-event corpus) — all met. This phase is thematic rather than strictly
-sequential — items are largely independent tracks; pick by pilot/partner pull. The
-remaining four milestones (federated learning, AR, multi-state tenanting, insurance
-API) are all still planned.
+**Status: 🟡 milestones 1–3 built, milestone 6 spiked** (CAP + official interop;
+hazard registry refactor; open-data pipeline with DP + retention jobs; AR mode's
+backend data path + mobile overlay math, and a federated-learning spike with a real
+go/no-go result). Prereqs: phase 3 (service split, mobile app, verified-event corpus)
+— all met. This phase is thematic rather than strictly sequential — items are largely
+independent tracks; pick by pilot/partner pull. The remaining three milestones
+(multi-state tenanting, vulnerability-aware alerting, insurance API) are all still
+planned; AR mode's on-device camera rendering remains blocked on physical-device
+availability — see milestone 6 below.
 
 ## Goals
 
@@ -421,6 +424,185 @@ license are both external/decision steps left as placeholders (`DatasetRelease.d
 the datasheet's licensing section), the same "pilot placeholder swappable the day a
 real integration lands" posture as `cap_sender`/`cap_sender_name` in milestone 1.
 
+## Milestone 6 — as built (AR mode; federated-learning spike → go/no-go)
+
+The plan names this milestone a "timeboxed spike," and it's built to exactly that
+bar for both halves: real, tested, honestly-scoped, and answering a question rather
+than shipping a finished feature.
+
+**AR flood visualization — what's real vs. what's blocked.** The plan's own words —
+"camera view renders predicted flood line at forecast surge height" — split cleanly
+into a data problem and a native-rendering problem, and only the first is buildable
+and verifiable in this environment.
+
+*Backend — `GET /map/inundation/point`.* `modules/inundation/service.py::
+predicted_depth_at_point(db, lat, lon, hours_ahead)` is the point-query counterpart
+to the existing cell-set endpoints (`flooded_cells_geojson`/
+`forecast_flooded_cells_geojson`): "how deep would it get right here" instead of "map
+me every flooded cell." Scoping this surfaced a real, previously-undocumented trap:
+`elevation_cells` is built at H3 resolution 9 (`scripts/inundation/
+build_elevation_cells.sh`), one resolution finer than this app's default
+`H3_RESOLUTION=8` that every other module (reports, incidents, damage assessments)
+uses — `cell_for(lat, lon)` called with no explicit resolution, exactly how every
+other call site in the app already calls it, silently returns a cell that will never
+match a row in this table. `predicted_depth_at_point` calls `cell_for(lat, lon,
+resolution=ELEVATION_H3_RESOLUTION)` explicitly and the new `ELEVATION_H3_RESOLUTION
+= 9` constant is now documented right next to `load_elevation_table` so the next
+caller doesn't rediscover this the hard way. hours_ahead=0 (default) reuses
+`latest_water_level`'s live-gauge wiring; hours_ahead>0 reuses
+`latest_sensor_forecast_point`'s forecast wiring — same two data sources the cell-set
+endpoints already use, just answering a point instead of a set. Degrades to
+`depth_m=null`/`flooded=false` rather than 404ing when there's no fresh reading, no
+forecast, or no DEM coverage at that point, so a client renders a plain camera view
+with nothing overlaid instead of an error screen.
+
+*Mobile — `src/lib/flood_overlay.ts`.* Given a device pose (assumed eye height,
+downward pitch, vertical field of view) and a predicted depth at a known
+distance, `projectFloodLine()` computes where on screen a horizontal flood line
+should render — ordinary pinhole-camera trigonometry, not real AR: it assumes a flat
+ground plane between device and target, the same simplification the bathtub model
+itself already documents (`inundation/engine.py`'s own docstring: "no flow
+routing... a low-lying cell cut off from the sea by a ridge still floods here, same
+as an actual bathtub"). It answers "where would the line go," not "how do I get pose
+and distance from a real camera."
+
+**Not built, deliberately:** camera passthrough, on-device pose/distance sensing, and
+ARCore/ARKit-anchored world tracking. `mobile/package.json` has zero AR/camera
+dependencies today (`expo-camera`, `expo-gl`, `@viro-community/react-viro`, and
+similar are all absent), and standing one up requires a native build (Expo prebuild
+plus an Android Studio/Xcode toolchain) and a physical device or emulator to
+run and verify against — none of which exist in this environment. This is the exact
+same limitation `mesh.ts`'s own docstring already documents for the BLE/Wi-Fi Direct
+radio transport (phase 3): the protocol logic is real and tested, the radio itself
+is represented only as an injected interface. `flood_overlay.ts` gets the same
+treatment here — real, tested math with no screen wired up to call it yet (see
+`mobile/README.md`'s "Not built" list) — rather than writing an unverifiable native
+screen and claiming it works.
+
+**Federated learning spike → go/no-go.** The plan's own text names "the image
+damage classifier (clearest label source)" as the starting point. Scoping this
+surfaced a precondition that doesn't hold: `modules/recovery/cv.py::
+classify_from_stats()` is a fixed threshold table over Pillow pixel statistics (blue-
+pixel fraction, edge density) — it has no trainable parameters at all, so there is
+nothing to federate there yet (see that module's own docstring for why a real image
+classifier was never built without labeled data to train one on). The only
+subsystem in this app with real, versioned, retrained weights is the NLP hazard
+classifier's linear probe (`training/train_classifier.py`, `model_versions`/
+`training_examples`, phase 1 milestone 4), so this spike targets that instead — the
+go/no-go conclusion below is about federated averaging as a technique for this app's
+labeled-data situation, not specifically about images.
+
+*`backend/training/federated.py`.* `federated_average(coefs, intercepts, weights)` is
+the FedAvg aggregation step (McMahan et al., 2017): a weighted mean of per-shard
+model parameters, weighted by each shard's local example count. Built as one-vs-rest
+— a separate binary logistic model per hazard class, each independently federated —
+rather than a single shared multinomial model, because a binary "is this class or
+not" problem is always poolable across non-IID shards (a fixed coefficient shape no
+matter which other classes a shard happens to contain); a shared multinomial
+`coef_` matrix is not, since its shape and row order depend on which classes a
+shard's local data actually contains, which real devices can't be relied on to
+match. `simulate_federated_round()` fits each class only from shards with at least
+`MIN_PER_CLASS=2` positive and 2 negative local examples for that class, excluding —
+not erroring on — a shard that can't; `FederatedClassifier` (classes/coefs/
+intercepts, nothing else) is the only thing that crosses back from a round.
+`run_spike()` runs both paths — federated and centralized — over the identical
+train/eval split pulled from real `training_examples` via the same
+`retrain.py::export_examples()` the centralized retrain loop already uses, so the
+only variable measured is "federated vs. centralized," not "different data."
+
+**DPDP data-flow story** (the plan's own "document data-flow diagram alongside
+implementation" instruction):
+
+```
+Real deployment (not simulated):
+  device's raw report text/photos ── never transmitted, stays on device
+              │
+              ▼
+  shared frozen sentence-transformer (already shipped; no training happens on it)
+              │
+              ▼
+  local embedding + local label ── stays on device
+              │
+              ▼
+  local binary logistic fit (that device's own examples only)
+              │
+              ▼  per-class (coefficient, intercept) arrays — numbers only
+       ┌──────────────────────────────────────────────┐
+       │  server: federated_average() across devices   │
+       └──────────────────────────────────────────────┘
+              │
+              ▼
+     updated global FederatedClassifier, broadcast back to devices
+
+This spike (backend/training/federated.py) simulates N devices in one process:
+embeddings/labels are computed centrally only because it stands in for "the same
+frozen embedder running locally on each simulated device," not because a real
+deployment would need text to leave the phone. federated_average()'s own signature
+— coefs, intercepts, weights, all numeric arrays — makes it structurally impossible
+to pass raw text or per-example data through it, mirrored by
+test_federated.py::test_federated_classifier_only_carries_numeric_parameters_not_raw_data,
+which asserts FederatedClassifier's only fields are classes/coefs/intercepts.
+```
+
+**Verified in two layers.** `tests/test_federated.py` (13 tests) prove the
+aggregation arithmetic (`federated_average`'s weighted mean against hand-computed
+expectations), the exclusion behavior (a class no shard can locally fit is dropped,
+not fabricated), correct prediction on separable synthetic clusters, and — found
+by running the spike for real, not anticipated up front — that a corpus too small
+for any shard to federate anything degrades to a reported `f1_macro: 0.0` instead of
+crashing out of `FederatedClassifier.predict()` (the original bug: it raised).
+
+`backend/training/federated_spike.py` (the live-numbers run, same operational-entry-
+point convention as `retrain.py`) was run against the real dev database's actual
+`training_examples` table — 9 rows, 8 usable after the same `MIN_EXAMPLES_PER_CLASS`
+filter the centralized loop applies (`erosion`: 2, `rip_current`: 6 — the only two
+classes with enough examples at all yet). At every tested shard count (2, 3, 5), no
+single shard had enough local examples to fit even one binary class model — real
+`federated_metrics: {"f1_macro": 0.0, "classes_covered": []}` every time — while the
+centralized baseline, trained on the exact same held-out split, hit `f1_macro: 1.0`.
+
+**Go/no-go: not yet.** The aggregation mechanism itself works — proven in tests
+against adequate synthetic volume, where federated and centralized both classify
+correctly. The blocker is today's real labeled-data volume, not the technique: this
+app's `training_examples` table is nowhere near big enough for even a two-shard
+split to locally clear the per-class minimum a single *centralized* fit already
+handles fine at this size. This mirrors, at one level further down, the exact
+labeled-volume risk `train_classifier.py`'s own docstring already flags for the
+centralized loop itself ("scope matches the labeled-volume risk called out in the
+phase-1 plan... swap in a real transformer fine-tune once training_examples clears
+the ~500-row threshold noted there") — federating a model this data-starved has
+nothing to gain over training it centrally, and loses accuracy for the privacy
+benefit at a stage where the corpus is far too small for that benefit to be load-
+bearing yet (few enough devices are involved, and few enough examples per device,
+that the "photos/text never leave the phone" property has essentially no attack
+surface to protect against today). Revisit once `training_examples` reaches roughly
+the same few-hundred-row volume already named as the trigger for a real centralized
+fine-tune — re-run `python -m training.federated_spike` at that point; if federated
+accuracy is then close to centralized, that's the real go signal this spike was
+built to produce.
+
+**Backend suite:** 537 → 555 tests (18 new: 5 in `test_inundation_service.py` for
+`predicted_depth_at_point`'s flooded/not-flooded/no-coverage/forecast branches, 13 in
+`test_federated.py`), all passing, no migration (no schema change) and no new
+dependency (`numpy`/`scikit-learn` were already present for the NLP classifier and
+open-data DP noise). Mobile: 44 → 50 tests (6 new in `flood_overlay.test.ts`), clean
+`tsc --noEmit`.
+
+**Live-verified** against the persistent dev stack: after `scripts/drill.py` injected
+its usual ~2.6m tide-gauge surge, `GET /map/inundation/point` was checked against a
+real flooded cell (its polygon centroid from the existing cell-set endpoint resolved
+to the *identical* H3 cell independently, confirming the point-query and cell-set
+paths agree: `elevation_m=0.0`, live `water_level_m=2.66`, `depth_m=2.66`,
+`flooded=true`), a real not-flooded point (Chennai Marina, `elevation_m=4.07` above
+the live level, `depth_m=null`), a point with no DEM coverage at all (far outside the
+Chennai extract — degrades to `elevation_m=null` rather than erroring), and the
+`hours_ahead` forecast branch (returned a genuinely different value — 1.1645m — from
+a real sensor forecast, not an echo of the live reading, confirming that branch
+really is wired to `latest_sensor_forecast_point` and not just aliased to the
+default). The federated-learning spike's real numbers above are themselves the
+milestone's live verification for that half — run against the actual dev database,
+not a synthetic fixture.
+
 ## Milestones
 
 1. CAP generator + inbound CAP corroboration — ✅ built, see above
@@ -428,7 +610,10 @@ real integration lands" posture as `cap_sender`/`cap_sender_name` in milestone 1
 3. Open-data pipeline with DP + retention jobs — ✅ built, see below
 4. Multi-state tenanting + per-district metrics
 5. Vulnerability-aware alerting (with DPO review)
-6. AR mode; federated learning spike → go/no-go
+6. AR mode; federated learning spike → go/no-go — 🟡 spiked, see below (backend
+   depth-query + mobile overlay math built and tested; on-device camera rendering
+   blocked on hardware; federated-learning go/no-go: **not yet** at today's real
+   labeled-data volume)
 7. Insurance trigger API pilot
 
 ## Verification
@@ -449,3 +634,14 @@ real integration lands" posture as `cap_sender`/`cap_sender_name` in milestone 1
   proves every derived table degrades gracefully for a minimal hazard; `scripts/
   hazard_registry_live_check.py` proves the same against the real running stack with an
   actual added-then-removed YAML file and a rebuild).
+- Federated learning: timebox, then go/no-go — ✅ done (`backend/training/federated.py` +
+  `tests/test_federated.py` prove the FedAvg mechanism against synthetic data;
+  `python -m training.federated_spike` run against the real dev database's actual
+  `training_examples` produced a real go/no-go: **not yet**, blocked on labeled-data
+  volume rather than the technique — see milestone 6 above).
+- AR: predicted depth reaches the client and projects to a plausible screen position —
+  ✅ done for the data path (`tests/test_inundation_service.py` +
+  live-verified `GET /map/inundation/point` against real DEM/gauge data;
+  `mobile/tests/flood_overlay.test.ts` proves the projection math); camera-rendered
+  verification on a physical device remains out of scope for this environment (see
+  milestone 6 above).

@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from app.modules.geo.h3utils import cell_for
 from app.modules.inundation import service
 
@@ -79,3 +81,78 @@ def test_predicted_flooded_cells_applies_bathtub_model_to_current_level(monkeypa
     monkeypatch.setattr(service, "latest_water_level", lambda db: 2.0)
     monkeypatch.setattr(service, "load_elevation_table", lambda db: {_CELL_LOW: 1.0, _CELL_HIGH: 5.0})
     assert service.predicted_flooded_cells(object()) == {_CELL_LOW}
+
+
+# --- predicted_depth_at_point ---------------------------------------------------
+
+_POINT_LAT, _POINT_LON = 13.08, 80.27
+_POINT_CELL = cell_for(_POINT_LAT, _POINT_LON, resolution=service.ELEVATION_H3_RESOLUTION)
+
+
+def test_predicted_depth_at_point_reports_depth_when_flooded(monkeypatch):
+    monkeypatch.setattr(
+        service, "get_settings",
+        lambda: SimpleNamespace(inundation_reference_variable="water_level", inundation_wire_hours=2.0),
+    )
+    monkeypatch.setattr(service, "latest_water_level", lambda db: 2.0)
+    result = service.predicted_depth_at_point(_Db([(1.2,)]), _POINT_LAT, _POINT_LON)
+
+    assert result["h3_cell"] == _POINT_CELL
+    assert result["elevation_m"] == 1.2
+    assert result["water_level_m"] == 2.0
+    assert result["depth_m"] == pytest.approx(0.8)
+    assert result["flooded"] is True
+
+
+def test_predicted_depth_at_point_not_flooded_when_elevation_above_water_level(monkeypatch):
+    monkeypatch.setattr(
+        service, "get_settings",
+        lambda: SimpleNamespace(inundation_reference_variable="water_level", inundation_wire_hours=2.0),
+    )
+    monkeypatch.setattr(service, "latest_water_level", lambda db: 1.0)
+    result = service.predicted_depth_at_point(_Db([(5.0,)]), _POINT_LAT, _POINT_LON)
+
+    assert result["depth_m"] is None
+    assert result["flooded"] is False
+
+
+def test_predicted_depth_at_point_degrades_gracefully_with_no_dem_coverage(monkeypatch):
+    monkeypatch.setattr(
+        service, "get_settings",
+        lambda: SimpleNamespace(inundation_reference_variable="water_level", inundation_wire_hours=2.0),
+    )
+    monkeypatch.setattr(service, "latest_water_level", lambda db: 2.0)
+    result = service.predicted_depth_at_point(_Db([]), _POINT_LAT, _POINT_LON)
+
+    assert result["elevation_m"] is None
+    assert result["depth_m"] is None
+    assert result["flooded"] is False
+
+
+def test_predicted_depth_at_point_degrades_gracefully_with_no_fresh_reading(monkeypatch):
+    monkeypatch.setattr(
+        service, "get_settings",
+        lambda: SimpleNamespace(inundation_reference_variable="water_level", inundation_wire_hours=2.0),
+    )
+    monkeypatch.setattr(service, "latest_water_level", lambda db: None)
+    result = service.predicted_depth_at_point(_Db([(1.0,)]), _POINT_LAT, _POINT_LON)
+
+    assert result["water_level_m"] is None
+    assert result["depth_m"] is None
+    assert result["flooded"] is False
+
+
+def test_predicted_depth_at_point_uses_forecast_when_hours_ahead_given(monkeypatch):
+    monkeypatch.setattr(
+        service, "get_settings",
+        lambda: SimpleNamespace(inundation_reference_variable="water_level", inundation_wire_hours=2.0),
+    )
+    monkeypatch.setattr(
+        service, "latest_sensor_forecast_point",
+        lambda db, variable, hours_ahead: {"value": 3.0, "time": "2026-01-01T00:00:00+00:00"},
+    )
+    result = service.predicted_depth_at_point(_Db([(1.0,)]), _POINT_LAT, _POINT_LON, hours_ahead=2.0)
+
+    assert result["water_level_m"] == 3.0
+    assert result["forecast_time"] == "2026-01-01T00:00:00+00:00"
+    assert result["depth_m"] == pytest.approx(2.0)

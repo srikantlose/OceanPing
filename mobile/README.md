@@ -15,6 +15,8 @@ screen ever blocks on connectivity.
 | `src/lib/sync.ts` | Drains the queue against the API over an injected `fetch` |
 | `src/lib/storage.ts` | SQLite persistence (device) and an in-memory fallback |
 | `src/lib/client.ts` | App singletons: queue, device identity, background drain loop |
+| `src/lib/mesh.ts` | BLE/Wi-Fi Direct mesh-relay protocol spike (phase 3) — no radio transport |
+| `src/lib/flood_overlay.ts` | AR flood-line overlay projection math (phase 4, milestone 6) — no camera screen |
 | `src/screens/` | Report, Mark Safe, and Outbox screens |
 
 `queue.ts` and `sync.ts` deliberately import nothing from React Native, which
@@ -81,3 +83,11 @@ stack running.
   unit tests, the client↔server contract by the live check above, and the
   screens by a clean `tsc` pass — but the UI itself has not been rendered on
   a real device in this environment.
+- **AR camera screen (phase 4, milestone 6).** `flood_overlay.ts` computes
+  where a flood line should render on screen given a device pose and a
+  predicted depth (from the backend's `GET /map/inundation/point`), and is
+  fully unit-tested. Camera passthrough, device pose (pitch, distance-to-
+  target), and ARCore/ARKit-anchored rendering are a native module this
+  environment has no physical device or emulator to build against or verify
+  — same limitation as the mesh relay's radio transport above. The math is
+  real and tested; the screen that would call it is not built here.
